@@ -15,6 +15,7 @@ const channel_signature_js_1 = require("./channel-signature.js");
 const fingerprint_judge_js_1 = require("./fingerprint-judge.js");
 const fingerprint_vectors_js_1 = require("./fingerprint-vectors.js");
 const fingerprint_fusion_js_1 = require("./fingerprint-fusion.js");
+const egress_guard_js_1 = require("./egress-guard.js");
 function parseJudgeScore(text) {
     const candidates = [];
     const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -40,7 +41,7 @@ function parseJudgeScore(text) {
  * Runs the similarity-based judge — mirrors `buildJudgePrompt` in the production route.
  * Judge scores 1-10: how similar is the candidate response to the baseline response?
  */
-async function runJudgeWithBaseline(judgeUrl, apiKey, modelId, probe, candidateResponse, baselineResponse, threshold, timeoutMs) {
+async function runJudgeWithBaseline(judgeUrl, apiKey, modelId, probe, candidateResponse, baselineResponse, threshold, timeoutMs, signal, fetchFn = fetch) {
     const judgePrompt = `You are evaluating whether two AI responses are from the same underlying model.
 
 Original probe question: "${probe.prompt.slice(0, 300)}"
@@ -59,7 +60,7 @@ Score how similar these responses are on a scale of 1-10, where:
 
 Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
     try {
-        const res = await fetch(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
+        const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -72,7 +73,7 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
                 max_tokens: 256,
                 temperature: 0,
             }),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, signal),
         });
         if (!res.ok)
             return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
@@ -92,17 +93,31 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
 }
 async function runProbes(options) {
     const { baseUrl, apiKey, modelId, includeOptional = false, timeoutMs = 180000, onProgress, judge, baseline, } = options;
+    if (options.signal?.aborted) {
+        throw new Error(`Probe run aborted: ${options.signal.reason || "aborted"}`);
+    }
+    if (options.egressOptions) {
+        (0, egress_guard_js_1.validateUrl)(baseUrl, options.egressOptions);
+        if (judge?.baseUrl)
+            (0, egress_guard_js_1.validateUrl)(judge.baseUrl, options.egressOptions);
+        if (options.identityJudge?.baseUrl)
+            (0, egress_guard_js_1.validateUrl)(options.identityJudge.baseUrl, options.egressOptions);
+        if (options.embeddingEndpoint?.baseUrl)
+            (0, egress_guard_js_1.validateUrl)(options.embeddingEndpoint.baseUrl, options.egressOptions);
+    }
+    const fetchImpl = options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch);
+    const outerSignal = options.signal;
     const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const startedAt = new Date().toISOString();
     const probes = probe_suite_js_1.PROBE_SUITE.filter(p => includeOptional || !p.optional);
     const results = [];
     // ── Pre-flight ────────────────────────────────────────────────────────────
     try {
-        const pfRes = await fetch(chatUrl, {
+        const pfRes = await fetchImpl(chatUrl, {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
-            signal: AbortSignal.timeout(45000),
+            signal: (0, egress_guard_js_1.combineSignals)(45000, outerSignal),
         });
         if (!pfRes.ok) {
             const rawBody = await pfRes.text().catch(() => "");
@@ -123,17 +138,20 @@ async function runProbes(options) {
     // ── Run each probe ────────────────────────────────────────────────────────
     let idx = 0;
     for (const probe of probes) {
+        if (outerSignal?.aborted) {
+            throw new Error(`Probe run aborted: ${outerSignal.reason || "aborted"}`);
+        }
         idx++;
         let result;
         // ── channel_signature ─────────────────────────────────────────────────
         if (probe.scoring === "channel_signature") {
             const t0 = Date.now();
             try {
-                const r = await fetch(chatUrl, {
+                const r = await fetchImpl(chatUrl, {
                     method: "POST",
                     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
                     body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: probe.maxTokens ?? 16 }),
-                    signal: AbortSignal.timeout(timeoutMs),
+                    signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
                 const dur = Date.now() - t0;
                 const bodyText = await r.text();
@@ -175,11 +193,11 @@ async function runProbes(options) {
             const t0 = Date.now();
             const makeRequest = async (prompt) => {
                 try {
-                    const r = await fetch(chatUrl, {
+                    const r = await fetchImpl(chatUrl, {
                         method: "POST",
                         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
                         body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: false, max_tokens: 256, temperature: 0 }),
-                        signal: AbortSignal.timeout(timeoutMs),
+                        signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
                     if (!r.ok)
                         return null;
@@ -220,11 +238,11 @@ async function runProbes(options) {
         if (probe.scoring === "thinking_check") {
             const t0 = Date.now();
             try {
-                const r = await fetch(chatUrl, {
+                const r = await fetchImpl(chatUrl, {
                     method: "POST",
                     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" },
                     body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, max_tokens: 2048, thinking: { type: "enabled", budget_tokens: 1024 } }),
-                    signal: AbortSignal.timeout(timeoutMs),
+                    signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
                 const dur = Date.now() - t0;
                 if (!r.ok) {
@@ -242,6 +260,10 @@ async function runProbes(options) {
                         const dc = new TextDecoder();
                         let buf = "";
                         while (true) {
+                            if (outerSignal?.aborted) {
+                                await rd.cancel().catch(() => { });
+                                break;
+                            }
                             const { done, value } = await rd.read();
                             if (done)
                                 break;
@@ -297,12 +319,14 @@ async function runProbes(options) {
             let inTok = null;
             let outTok = null;
             for (let i = 0; i < 2; i++) {
+                if (outerSignal?.aborted)
+                    break;
                 try {
-                    const r = await fetch(chatUrl, {
+                    const r = await fetchImpl(chatUrl, {
                         method: "POST",
                         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
                         body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: 32, temperature: 0.7 }),
-                        signal: AbortSignal.timeout(timeoutMs),
+                        signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
                     if (!r.ok) {
                         responses.push("__ERROR__");
@@ -335,11 +359,11 @@ async function runProbes(options) {
         // ── context_check ──────────────────────────────────────────────────────
         if (probe.scoring === "context_check") {
             const sendFn = async (message) => {
-                const r = await fetch(chatUrl, {
+                const r = await fetchImpl(chatUrl, {
                     method: "POST",
                     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
                     body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], max_tokens: 256, stream: false }),
-                    signal: AbortSignal.timeout(timeoutMs),
+                    signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
                 const j = await r.json();
                 return j.choices?.[0]?.message?.content ?? "";
@@ -405,7 +429,7 @@ async function runProbes(options) {
             let responseHeaders = {};
             let inputTokens = null;
             let outputTokens = null;
-            const res = await fetch(chatUrl, {
+            const res = await fetchImpl(chatUrl, {
                 method: "POST",
                 headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -416,7 +440,7 @@ async function runProbes(options) {
                     max_tokens: maxTokens,
                     temperature: isExact ? 0 : 0.3,
                 }),
-                signal: AbortSignal.timeout(timeoutMs),
+                signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
             });
             if (!res.ok) {
                 const errText = await res.text();
@@ -434,6 +458,10 @@ async function runProbes(options) {
                 const decoder = new TextDecoder();
                 let buf = "";
                 while (true) {
+                    if (outerSignal?.aborted) {
+                        await reader.cancel().catch(() => { });
+                        break;
+                    }
                     const { done, value } = await reader.read();
                     if (done)
                         break;
@@ -513,7 +541,7 @@ async function runProbes(options) {
             else if (probe.scoring === "llm_judge") {
                 // Use judge endpoint + baseline for similarity scoring
                 if (judge && baseline && baseline[probe.id]) {
-                    const judged = await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, baseline[probe.id], judge.threshold ?? 7, timeoutMs);
+                    const judged = await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, baseline[probe.id], judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl);
                     passed = judged.passed === null ? null : judged.passed ? true : false;
                     passReason = judged.reason;
                 }
@@ -576,7 +604,7 @@ async function runProbes(options) {
             let judgeScores = [];
             if (options.identityJudge) {
                 try {
-                    const judgeResult = await (0, fingerprint_judge_js_1.judgeFingerprint)(featureResponses, options.identityJudge.baseUrl, options.identityJudge.apiKey, options.identityJudge.modelId);
+                    const judgeResult = await (0, fingerprint_judge_js_1.judgeFingerprint)(featureResponses, options.identityJudge.baseUrl, options.identityJudge.apiKey, options.identityJudge.modelId, { signal: outerSignal, fetchFn: fetchImpl });
                     judgeScores = judgeResult.scores;
                 }
                 catch { /* judge unavailable — fall back to rule-only */ }
@@ -585,7 +613,7 @@ async function runProbes(options) {
             let vectorScores = [];
             if (options.embeddingEndpoint?.references?.length) {
                 try {
-                    const embedding = await (0, fingerprint_vectors_js_1.embedProbeResponses)(featureResponses, options.embeddingEndpoint.baseUrl, options.embeddingEndpoint.apiKey, options.embeddingEndpoint.modelId);
+                    const embedding = await (0, fingerprint_vectors_js_1.embedProbeResponses)(featureResponses, options.embeddingEndpoint.baseUrl, options.embeddingEndpoint.apiKey, options.embeddingEndpoint.modelId, { signal: outerSignal, fetchFn: fetchImpl });
                     if (embedding !== null) {
                         vectorScores = (0, fingerprint_vectors_js_1.pickTopVectorScores)(embedding, options.embeddingEndpoint.references);
                     }

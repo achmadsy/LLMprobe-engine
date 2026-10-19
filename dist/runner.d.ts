@@ -1,5 +1,6 @@
 import { type ReferenceEmbedding } from "./fingerprint-vectors.js";
 import type { IdentityAssessment } from "./identity-report.js";
+import { type EgressOptions } from "./egress-guard.js";
 export interface ProbeResult {
     probeId: string;
     label: string;
@@ -84,6 +85,12 @@ export interface RunOptions {
         /** Reference embeddings (family → embedding vector). If absent, vector signal is skipped. */
         references?: ReferenceEmbedding[];
     };
+    /** External AbortSignal to cancel the entire probe run */
+    signal?: AbortSignal;
+    /** Custom fetch implementation (defaults to safeFetch if egressOptions provided, else global fetch) */
+    fetchFn?: typeof fetch;
+    /** Egress guard options (SSRF defense, port allowlist, etc.) */
+    egressOptions?: EgressOptions;
 }
 export declare function runProbes(options: RunOptions): Promise<RunReport>;
 //# sourceMappingURL=runner.d.ts.map

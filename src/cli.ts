@@ -751,4 +751,48 @@ program
     process.exit(exitCode);
   });
 
+// ── sidecar command ───────────────────────────────────────────────────────────
+
+program
+  .command("sidecar")
+  .description("Start the internal bearer-auth HTTP API sidecar")
+  .option("-p, --port <port>", "Port to listen on (default: 3001 or $PORT)", process.env.PORT || "3001")
+  .option("-h, --host <host>", "Host to listen on (default: 0.0.0.0 or $HOST)", process.env.HOST || "0.0.0.0")
+  .option("-t, --token <token>", "Bearer token for authorization (default: $PROBE_SIDECAR_TOKEN)")
+  .option("--allowed-ports <ports>", "Comma-separated list of allowed public ports (default: 80,443,8443)")
+  .action(async (opts: { port: string; host: string; token?: string; allowedPorts?: string }) => {
+    const { createSidecarServer, SIDECAR_VERSION, SIDECAR_LICENSE, SIDECAR_SOURCE } = await import("./sidecar.js");
+    const port = parseInt(opts.port, 10) || 3001;
+    const host = opts.host || "0.0.0.0";
+    const allowedPorts = opts.allowedPorts
+      ? opts.allowedPorts.split(",").map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p))
+      : undefined;
+
+    const server = createSidecarServer({
+      port,
+      host,
+      bearerToken: opts.token,
+      egressOptions: { allowedPorts },
+    });
+
+    try {
+      const bound = await server.listen(port, host);
+      console.log(`BazaarLink Probe Engine Sidecar v${SIDECAR_VERSION} (${SIDECAR_LICENSE})`);
+      console.log(`Source code: ${SIDECAR_SOURCE}`);
+      console.log(`Listening on http://${bound.host}:${bound.port}`);
+
+      const shutdown = async () => {
+        console.log("\nShutting down sidecar...");
+        await server.close();
+        process.exit(0);
+      };
+
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+    } catch (err) {
+      console.error("Failed to start sidecar:", (err as Error).message);
+      process.exit(1);
+    }
+  });
+
 program.parse();

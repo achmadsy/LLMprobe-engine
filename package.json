@@ -11,13 +11,16 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/cli.ts",
+    "sidecar": "ts-node src/sidecar-cli.ts",
+    "start:sidecar": "node dist/sidecar-cli.js",
     "test": "vitest run --passWithNoTests"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "commander": "^12.0.0"
+    "commander": "^12.0.0",
+    "undici": "^7.30.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

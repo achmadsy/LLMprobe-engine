@@ -83,4 +83,9 @@ export type { SubModelExtractorInput } from "./submodel-features.js";
 export { flattenLinguisticFeatures, matchSubModelsLinguistic, identifySubModelBayesian, baselinesFromDbRows, } from "./sub-model-matcher.js";
 export { bayesianScoreDisplayCalibrated, } from "./fingerprint-bayesian.js";
 export type { CalibratedScoreOptions, } from "./fingerprint-bayesian.js";
+export { createSidecarServer, SidecarServer, SIDECAR_VERSION, SIDECAR_LICENSE, SIDECAR_SOURCE, } from "./sidecar.js";
+export type { SidecarConfig, ActiveRunState } from "./sidecar.js";
+export { validateUrl, createSafeAgent, createSafeFetch, combineSignals, isPrivateOrReservedIp, isPrivateOrReservedIPv4, isPrivateOrReservedIPv6, isBlockedHostname, resolveAllowedPorts, DEFAULT_ALLOWED_PORTS, EgressError, } from "./egress-guard.js";
+export type { EgressOptions } from "./egress-guard.js";
+export { redactSecrets, truncateString, boundError, sanitizeProbeResult, sanitizeReport, } from "./redaction.js";
 //# sourceMappingURL=index.d.ts.map

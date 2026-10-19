@@ -8,12 +8,16 @@ export interface JudgeIdentityResult {
 export declare function parseJudgeIdentityResult(text: string): JudgeIdentityResult | null;
 /** Build the judge prompt from probe responses. */
 export declare function buildJudgeIdentityPrompt(responses: Record<string, string>): string;
+export interface JudgeFingerprintOptions {
+    signal?: AbortSignal;
+    fetchFn?: typeof fetch;
+}
 /**
  * Call LLM judge to identify model family from probe responses.
  * Returns FamilyScore[] with the judge's top pick scored and all others at 0.
  * Returns empty array if judge is unavailable or fails.
  */
-export declare function judgeFingerprint(responses: Record<string, string>, judgeBaseUrl: string, judgeApiKey: string, judgeModelId: string): Promise<{
+export declare function judgeFingerprint(responses: Record<string, string>, judgeBaseUrl: string, judgeApiKey: string, judgeModelId: string, options?: JudgeFingerprintOptions): Promise<{
     scores: FamilyScore[];
     result: JudgeIdentityResult | null;
     costUsd: number | null;

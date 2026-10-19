@@ -15,6 +15,7 @@ import { judgeFingerprint } from "./fingerprint-judge.js";
 import { embedProbeResponses, pickTopVectorScores, type ReferenceEmbedding } from "./fingerprint-vectors.js";
 import { fuseScores } from "./fingerprint-fusion.js";
 import type { IdentityAssessment } from "./identity-report.js";
+import { combineSignals, createSafeFetch, validateUrl, type EgressOptions } from "./egress-guard.js";
 
 export interface ProbeResult {
   probeId: string;
@@ -103,6 +104,12 @@ export interface RunOptions {
     /** Reference embeddings (family → embedding vector). If absent, vector signal is skipped. */
     references?: ReferenceEmbedding[];
   };
+  /** External AbortSignal to cancel the entire probe run */
+  signal?: AbortSignal;
+  /** Custom fetch implementation (defaults to safeFetch if egressOptions provided, else global fetch) */
+  fetchFn?: typeof fetch;
+  /** Egress guard options (SSRF defense, port allowlist, etc.) */
+  egressOptions?: EgressOptions;
 }
 
 function parseJudgeScore(text: string): { score: number; reason: string } | null {
@@ -137,6 +144,8 @@ async function runJudgeWithBaseline(
   baselineResponse: string,
   threshold: number,
   timeoutMs: number,
+  signal?: AbortSignal,
+  fetchFn: typeof fetch = fetch,
 ): Promise<{ passed: boolean | null; reason: string }> {
   const judgePrompt = `You are evaluating whether two AI responses are from the same underlying model.
 
@@ -157,7 +166,7 @@ Score how similar these responses are on a scale of 1-10, where:
 Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
 
   try {
-    const res = await fetch(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
+    const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -170,7 +179,7 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
         max_tokens: 256,
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: combineSignals(timeoutMs, signal),
     });
     if (!res.ok) return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
     const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
@@ -198,6 +207,20 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     baseline,
   } = options;
 
+  if (options.signal?.aborted) {
+    throw new Error(`Probe run aborted: ${options.signal.reason || "aborted"}`);
+  }
+
+  if (options.egressOptions) {
+    validateUrl(baseUrl, options.egressOptions);
+    if (judge?.baseUrl) validateUrl(judge.baseUrl, options.egressOptions);
+    if (options.identityJudge?.baseUrl) validateUrl(options.identityJudge.baseUrl, options.egressOptions);
+    if (options.embeddingEndpoint?.baseUrl) validateUrl(options.embeddingEndpoint.baseUrl, options.egressOptions);
+  }
+
+  const fetchImpl = options.fetchFn ?? (options.egressOptions ? createSafeFetch(options.egressOptions) : fetch);
+  const outerSignal = options.signal;
+
   const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
   const startedAt = new Date().toISOString();
 
@@ -206,11 +229,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
 
   // ── Pre-flight ────────────────────────────────────────────────────────────
   try {
-    const pfRes = await fetch(chatUrl, {
+    const pfRes = await fetchImpl(chatUrl, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
-      signal: AbortSignal.timeout(45_000),
+      signal: combineSignals(45_000, outerSignal),
     });
     if (!pfRes.ok) {
       const rawBody = await pfRes.text().catch(() => "");
@@ -231,6 +254,9 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
   // ── Run each probe ────────────────────────────────────────────────────────
   let idx = 0;
   for (const probe of probes) {
+    if (outerSignal?.aborted) {
+      throw new Error(`Probe run aborted: ${outerSignal.reason || "aborted"}`);
+    }
     idx++;
     let result: ProbeResult;
 
@@ -238,11 +264,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     if (probe.scoring === "channel_signature") {
       const t0 = Date.now();
       try {
-        const r = await fetch(chatUrl, {
+        const r = await fetchImpl(chatUrl, {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: probe.maxTokens ?? 16 }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: combineSignals(timeoutMs, outerSignal),
         });
         const dur = Date.now() - t0;
         const bodyText = await r.text();
@@ -281,11 +307,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       const t0 = Date.now();
       const makeRequest = async (prompt: string): Promise<string | null> => {
         try {
-          const r = await fetch(chatUrl, {
+          const r = await fetchImpl(chatUrl, {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: false, max_tokens: 256, temperature: 0 }),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) return null;
           const d = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
@@ -323,11 +349,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     if (probe.scoring === "thinking_check") {
       const t0 = Date.now();
       try {
-        const r = await fetch(chatUrl, {
+        const r = await fetchImpl(chatUrl, {
           method: "POST",
           headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" },
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, max_tokens: 2048, thinking: { type: "enabled", budget_tokens: 1024 } }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: combineSignals(timeoutMs, outerSignal),
         });
         const dur = Date.now() - t0;
         if (!r.ok) {
@@ -339,6 +365,10 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           if (r.body) {
             const rd = r.body.getReader(); const dc = new TextDecoder(); let buf = "";
             while (true) {
+              if (outerSignal?.aborted) {
+                await rd.cancel().catch(() => {});
+                break;
+              }
               const { done, value } = await rd.read(); if (done) break;
               if (ttft === null) ttft = Date.now() - t0;
               buf += dc.decode(value, { stream: true });
@@ -379,12 +409,13 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       const responses: string[] = [];
       let inTok: number | null = null; let outTok: number | null = null;
       for (let i = 0; i < 2; i++) {
+        if (outerSignal?.aborted) break;
         try {
-          const r = await fetch(chatUrl, {
+          const r = await fetchImpl(chatUrl, {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: 32, temperature: 0.7 }),
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) { responses.push("__ERROR__"); continue; }
           const d = await r.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
@@ -409,11 +440,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     // ── context_check ──────────────────────────────────────────────────────
     if (probe.scoring === "context_check") {
       const sendFn = async (message: string) => {
-        const r = await fetch(chatUrl, {
+        const r = await fetchImpl(chatUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], max_tokens: 256, stream: false }),
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: combineSignals(timeoutMs, outerSignal),
         });
         const j = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
         return j.choices?.[0]?.message?.content ?? "";
@@ -485,7 +516,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       let inputTokens: number | null = null;
       let outputTokens: number | null = null;
 
-      const res = await fetch(chatUrl, {
+      const res = await fetchImpl(chatUrl, {
         method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -496,7 +527,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           max_tokens: maxTokens,
           temperature: isExact ? 0 : 0.3,
         }),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: combineSignals(timeoutMs, outerSignal),
       });
 
       if (!res.ok) {
@@ -517,6 +548,10 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         const decoder = new TextDecoder();
         let buf = "";
         while (true) {
+          if (outerSignal?.aborted) {
+            await reader.cancel().catch(() => {});
+            break;
+          }
           const { done, value } = await reader.read();
           if (done) break;
           if (ttftMs === null) ttftMs = Date.now() - startTime;
@@ -591,6 +626,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           const judged = await runJudgeWithBaseline(
             judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText,
             baseline[probe.id], judge.threshold ?? 7, timeoutMs,
+            outerSignal, fetchImpl,
           );
           passed = judged.passed === null ? null : judged.passed ? true : false;
           passReason = judged.reason;
@@ -663,6 +699,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
             options.identityJudge.baseUrl,
             options.identityJudge.apiKey,
             options.identityJudge.modelId,
+            { signal: outerSignal, fetchFn: fetchImpl },
           );
           judgeScores = judgeResult.scores;
         } catch { /* judge unavailable — fall back to rule-only */ }
@@ -677,6 +714,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
             options.embeddingEndpoint.baseUrl,
             options.embeddingEndpoint.apiKey,
             options.embeddingEndpoint.modelId,
+            { signal: outerSignal, fetchFn: fetchImpl },
           );
           if (embedding !== null) {
             vectorScores = pickTopVectorScores(embedding, options.embeddingEndpoint.references);

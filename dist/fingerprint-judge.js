@@ -46,12 +46,13 @@ ${sections}
 Reply with ONLY a JSON object:
 {"family": "<family>", "confidence": <0.0-1.0>, "reasons": ["<evidence 1>", "<evidence 2>", "<evidence 3>"]}`;
 }
+const egress_guard_js_1 = require("./egress-guard.js");
 /**
  * Call LLM judge to identify model family from probe responses.
  * Returns FamilyScore[] with the judge's top pick scored and all others at 0.
  * Returns empty array if judge is unavailable or fails.
  */
-async function judgeFingerprint(responses, judgeBaseUrl, judgeApiKey, judgeModelId) {
+async function judgeFingerprint(responses, judgeBaseUrl, judgeApiKey, judgeModelId, options) {
     if (!judgeBaseUrl || !judgeApiKey || !judgeModelId || Object.keys(responses).length === 0) {
         return { scores: [], result: null, costUsd: null };
     }
@@ -64,8 +65,9 @@ async function judgeFingerprint(responses, judgeBaseUrl, judgeApiKey, judgeModel
     catch {
         return { scores: [], result: null, costUsd: null };
     }
+    const fetchImpl = options?.fetchFn ?? fetch;
     try {
-        const res = await fetch(chatUrl, {
+        const res = await fetchImpl(chatUrl, {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${judgeApiKey}`,
@@ -84,7 +86,7 @@ async function judgeFingerprint(responses, judgeBaseUrl, judgeApiKey, judgeModel
                 max_tokens: 256,
                 temperature: 0,
             }),
-            signal: AbortSignal.timeout(30000),
+            signal: (0, egress_guard_js_1.combineSignals)(30000, options?.signal),
         });
         if (!res.ok)
             return { scores: [], result: null, costUsd: null };

@@ -12,9 +12,13 @@ export declare function cosineSimilarity(a: number[], b: number[]): number;
  * Normalizes so the highest similarity = 1.0.
  */
 export declare function pickTopVectorScores(queryEmbedding: number[], refs: ReferenceEmbedding[]): FamilyScore[];
+export interface EmbedProbeResponsesOptions {
+    signal?: AbortSignal;
+    fetchFn?: typeof fetch;
+}
 /**
  * Embed a block of probe responses text via an OpenAI-compatible embeddings endpoint.
  * Returns null if unavailable.
  */
-export declare function embedProbeResponses(responses: Record<string, string>, baseUrl: string, apiKey: string, modelId: string): Promise<number[] | null>;
+export declare function embedProbeResponses(responses: Record<string, string>, baseUrl: string, apiKey: string, modelId: string, options?: EmbedProbeResponsesOptions): Promise<number[] | null>;
 //# sourceMappingURL=fingerprint-vectors.d.ts.map

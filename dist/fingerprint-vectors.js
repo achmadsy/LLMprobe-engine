@@ -43,11 +43,12 @@ function pickTopVectorScores(queryEmbedding, refs) {
         score: Math.min(1, Math.max(0, (familyMax[family] ?? 0) / maxSim)),
     }));
 }
+const egress_guard_js_1 = require("./egress-guard.js");
 /**
  * Embed a block of probe responses text via an OpenAI-compatible embeddings endpoint.
  * Returns null if unavailable.
  */
-async function embedProbeResponses(responses, baseUrl, apiKey, modelId) {
+async function embedProbeResponses(responses, baseUrl, apiKey, modelId, options) {
     if (!apiKey || !modelId || Object.keys(responses).length === 0)
         return null;
     const text = Object.entries(responses)
@@ -60,12 +61,13 @@ async function embedProbeResponses(responses, baseUrl, apiKey, modelId) {
     catch {
         return null;
     }
+    const fetchImpl = options?.fetchFn ?? fetch;
     try {
-        const res = await fetch(url, {
+        const res = await fetchImpl(url, {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
             body: JSON.stringify({ model: modelId, input: text }),
-            signal: AbortSignal.timeout(30000),
+            signal: (0, egress_guard_js_1.combineSignals)(30000, options?.signal),
         });
         if (!res.ok)
             return null;

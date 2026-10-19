@@ -1061,6 +1061,20 @@ npm test
 
 ---
 
+## Sidecar HTTP API（本 fork 新增）
+
+本 fork 內建一個以 Bearer token 保護的內部 HTTP sidecar，包裝探針引擎：
+
+- `GET /health` — 回傳版本、授權與原始碼連結（需驗證）
+- `POST /v1/runs` — body `{ id, baseUrl, apiKey, modelId, claimedModel?, judge? }`；以 SSE 串流回傳 `start`、`progress`、`complete`、`canceled`、`error` 事件
+- `POST /v1/runs/:id/cancel` — 中止目前執行中的 run
+
+設定：`PROBE_SIDECAR_TOKEN`（建議必設）、`PORT`、`HOST`、`ALLOWED_PUBLIC_PORTS`（預設 `80,443,8443`）。所有對外探針流量在連線時進行 DNS pinning，並封鎖私有/保留網段；同一時間僅允許一個 run；金鑰不會被記錄或持久化。
+
+Docker image：`ghcr.io/achmadsy/llmprobe-engine`（由 `.github/workflows/publish.yml` 建置）。
+
+---
+
 ## 授權
 
 [AGPL-3.0-only](LICENSE) © BazaarLink

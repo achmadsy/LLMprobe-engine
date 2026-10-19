@@ -55,6 +55,13 @@ Reply with ONLY a JSON object:
 {"family": "<family>", "confidence": <0.0-1.0>, "reasons": ["<evidence 1>", "<evidence 2>", "<evidence 3>"]}`;
 }
 
+import { combineSignals } from "./egress-guard.js";
+
+export interface JudgeFingerprintOptions {
+  signal?: AbortSignal;
+  fetchFn?: typeof fetch;
+}
+
 /**
  * Call LLM judge to identify model family from probe responses.
  * Returns FamilyScore[] with the judge's top pick scored and all others at 0.
@@ -65,6 +72,7 @@ export async function judgeFingerprint(
   judgeBaseUrl: string,
   judgeApiKey: string,
   judgeModelId: string,
+  options?: JudgeFingerprintOptions,
 ): Promise<{ scores: FamilyScore[]; result: JudgeIdentityResult | null; costUsd: number | null }> {
   if (!judgeBaseUrl || !judgeApiKey || !judgeModelId || Object.keys(responses).length === 0) {
     return { scores: [], result: null, costUsd: null };
@@ -79,8 +87,10 @@ export async function judgeFingerprint(
     return { scores: [], result: null, costUsd: null };
   }
 
+  const fetchImpl = options?.fetchFn ?? fetch;
+
   try {
-    const res = await fetch(chatUrl, {
+    const res = await fetchImpl(chatUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${judgeApiKey}`,
@@ -99,7 +109,7 @@ export async function judgeFingerprint(
         max_tokens: 256,
         temperature: 0,
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: combineSignals(30_000, options?.signal),
     });
 
     if (!res.ok) return { scores: [], result: null, costUsd: null };

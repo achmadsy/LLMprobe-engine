@@ -53,6 +53,13 @@ export function pickTopVectorScores(
   }));
 }
 
+import { combineSignals } from "./egress-guard.js";
+
+export interface EmbedProbeResponsesOptions {
+  signal?: AbortSignal;
+  fetchFn?: typeof fetch;
+}
+
 /**
  * Embed a block of probe responses text via an OpenAI-compatible embeddings endpoint.
  * Returns null if unavailable.
@@ -62,6 +69,7 @@ export async function embedProbeResponses(
   baseUrl: string,
   apiKey: string,
   modelId: string,
+  options?: EmbedProbeResponsesOptions,
 ): Promise<number[] | null> {
   if (!apiKey || !modelId || Object.keys(responses).length === 0) return null;
 
@@ -76,12 +84,14 @@ export async function embedProbeResponses(
     return null;
   }
 
+  const fetchImpl = options?.fetchFn ?? fetch;
+
   try {
-    const res = await fetch(url, {
+    const res = await fetchImpl(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({ model: modelId, input: text }),
-      signal: AbortSignal.timeout(30_000),
+      signal: combineSignals(30_000, options?.signal),
     });
     if (!res.ok) return null;
     const data = await res.json() as { data?: Array<{ embedding?: number[] }> };

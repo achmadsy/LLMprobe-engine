@@ -48,15 +48,15 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=ghcr.io/${{ github.repository }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/achmadsy/llmprobe-engine,push-by-digest=true,name-canonical=true,push=true
           provenance: false
       - name: Collect digest
         run: |
-          echo "{\"${{ matrix.digest_key }}\":\"${{ steps.build.outputs.digest }}\"}" > digest.json
+          echo "{\"${{ matrix.digest_key }}\":\"${{ steps.build.outputs.digest }}\"}" > "digest-${{ matrix.digest_key }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.digest_key }}
-          path: digest.json
+          path: digest-${{ matrix.digest_key }}.json
 
   publish:
     needs: build
@@ -82,7 +82,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/achmadsy/llmprobe-engine
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -90,5 +90,5 @@ jobs:
       - name: Merge manifests and push tags
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            ghcr.io/${{ github.repository }}@sha256:${{ steps.digests.outputs.amd64 }} \
-            ghcr.io/${{ github.repository }}@sha256:${{ steps.digests.outputs.arm64 }}
+            ghcr.io/achmadsy/llmprobe-engine@${{ steps.digests.outputs.amd64 }} \
+            ghcr.io/achmadsy/llmprobe-engine@${{ steps.digests.outputs.arm64 }}

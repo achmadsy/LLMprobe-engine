@@ -2,7 +2,7 @@ name: publish-sidecar
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 

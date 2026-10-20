@@ -105,6 +105,60 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
         return { passed: null, reason: `Judge call failed: ${e.message?.slice(0, 100)}` };
     }
 }
+/**
+ * Rubric-based judge fallback for probes without a baseline entry: the judge
+ * LLM scores the candidate response against the probe question directly
+ * (instruction adherence, correctness, refusal-to-answer detection).
+ */
+async function runJudgeRubric(judgeUrl, apiKey, modelId, probe, candidateResponse, threshold, timeoutMs, signal, fetchFn = fetch, customHeaders) {
+    const judgePrompt = `You are grading an AI response against its original question.
+
+Question asked to the model under test:
+"${probe.prompt.slice(0, 500)}"
+
+Response under test:
+${candidateResponse.slice(0, 2000)}
+
+Score 1-10 on: instruction adherence, factual correctness, and whether the answer actually attempts the question (a refusal or empty answer scores 1-2).
+- 8-10: follows the instruction and answers correctly
+- 6-7: answers with minor issues
+- 1-5: ignores instructions, wrong, or refuses
+
+Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
+    try {
+        const judgeHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+        (0, custom_headers_js_1.mergeCustomHeaders)(judgeHeaders, customHeaders);
+        const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
+            method: "POST",
+            headers: judgeHeaders,
+            body: JSON.stringify({
+                model: modelId,
+                messages: [
+                    { role: "system", content: "You are a strict JSON-only evaluator. Respond ONLY with the JSON object requested." },
+                    { role: "user", content: judgePrompt },
+                ],
+                stream: false,
+                max_tokens: 256,
+                temperature: 0,
+            }),
+            signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, signal),
+        });
+        if (!res.ok)
+            return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
+        const data = await readBoundedJson(res);
+        const text = data.choices?.[0]?.message?.content ?? "";
+        const scored = parseJudgeScore(text);
+        if (!scored)
+            return { passed: null, reason: `Judge returned unparseable response: ${text.slice(0, 100)}` };
+        return {
+            passed: scored.score >= threshold,
+            reason: `Rubric score: ${scored.score}/10 (threshold: ${threshold}) — ${scored.reason}`,
+        };
+    }
+    catch (e) {
+        return { passed: null, reason: `Judge call failed: ${e.message?.slice(0, 100)}` };
+    }
+}
 async function runProbes(options) {
     const { baseUrl, apiKey, modelId, includeOptional = false, timeoutMs = 180000, onProgress, judge, baseline, customHeaders, } = options;
     if (options.signal?.aborted) {
@@ -706,7 +760,9 @@ async function runProbes(options) {
                 continue;
             }
             // ── Auto-scoreable (exact_match, keyword_match, header_check, exact_response) ─
-            const autoResult = (0, probe_suite_js_1.autoScore)(probe, fullText, responseHeaders, canaryOverride);
+            // English is the canonical dashboard language; the dynamic canary rides
+            // in opts, not the lang slot.
+            const autoResult = (0, probe_suite_js_1.autoScore)(probe, fullText, responseHeaders, "en", { overrideExpectedExact: canaryOverride });
             let passed = null;
             let passReason = null;
             if (autoResult) {
@@ -718,32 +774,35 @@ async function runProbes(options) {
                 passReason = "identity feature probe — response collected for fingerprint analysis";
             }
             else if (probe.scoring === "llm_judge") {
-                // Use judge endpoint + baseline for similarity scoring
+                // Prefer baseline similarity; fall back to a rubric grade when the
+                // model has no published baseline so quality probes never sit gray.
                 if (judge && baseline && baseline[probe.id]) {
                     const judged = await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, baseline[probe.id], judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders);
                     passed = judged.passed === null ? null : judged.passed ? true : false;
                     passReason = judged.reason;
                 }
-                else if (judge && !baseline) {
-                    passed = null;
-                    passReason = "llm_judge: no baseline provided — pass --baseline <file> or --fetch-baseline <url> to enable similarity scoring";
-                }
-                else if (!judge) {
-                    passed = null;
-                    passReason = "llm_judge: no judge endpoint configured — pass --judge-base-url to enable auto-scoring";
+                else if (judge) {
+                    const judged = await runJudgeRubric(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders);
+                    passed = judged.passed === null ? null : judged.passed ? true : false;
+                    passReason = judged.reason;
                 }
                 else {
                     passed = null;
-                    passReason = `llm_judge: no baseline entry for probe '${probe.id}' — run collect-baseline to build one`;
+                    passReason = "llm_judge: no judge endpoint configured — pass --judge-base-url to enable auto-scoring";
                 }
             }
             const transportRetries = (0, retry_fetch_js_1.retryCountOf)(res);
             if (transportRetries > 0 && passReason) {
                 passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
             }
+            // Surface the reference the response was judged against so the dashboard
+            // can show expected-vs-actual without reverse-engineering passReason.
+            const expected = probe.expectedExact ?? probe.expectedContains
+                ?? (probe.passIfContains?.length ? probe.passIfContains.join(" | ") : null);
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                 status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
-                response: fullText.slice(0, 4000), passed, passReason, error: null };
+                response: fullText.slice(0, 4000), passed, passReason, error: null,
+                scoring: probe.scoring, expected };
         }
         catch (err) {
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,

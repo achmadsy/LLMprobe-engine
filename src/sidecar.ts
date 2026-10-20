@@ -24,7 +24,7 @@ export interface ActiveRunState {
   abortController: AbortController;
 }
 
-export const SIDECAR_VERSION = "0.11.1";
+export const SIDECAR_VERSION = "0.12.0";
 export const SIDECAR_LICENSE = "AGPL-3.0-only";
 export const SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 
@@ -168,11 +168,16 @@ export class SidecarServer {
   private handleProbes(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!this.authenticate(req, res)) return;
 
-    const probes = PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral }) => ({
+    const probes = PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
       id,
       label,
       group,
       description,
+      scoring,
+      // Bounded question/reference text for the detail drawer (About/Question/Expected).
+      prompt: prompt?.slice(0, 500) ?? null,
+      expected: expectedExact ?? expectedContains
+        ?? (passIfContains?.length ? passIfContains.join(" | ") : null),
       ...(optional ? { optional: true } : {}),
       ...(isNew ? { isNew: true } : {}),
       ...(neutral ? { neutral: true } : {}),
@@ -396,7 +401,14 @@ export class SidecarServer {
     const sendSse = (event: string, data: unknown) => {
       if (res.writableEnded) return;
       const raw = typeof data === "string" ? data : JSON.stringify(data);
-      const redacted = truncateString(redactSecrets(raw, secrets), 32768);
+      // The complete event carries the full sanitized report (identity
+      // assessment included); truncating it corrupts the JSON and silently
+      // destroys the verdict on the consumer. Everything is redacted, and
+      // per-result payloads are bounded upstream, so only debug-sized raw
+      // strings get the 32 KiB cap.
+      const redacted = event === "complete"
+        ? redactSecrets(raw, secrets)
+        : truncateString(redactSecrets(raw, secrets), 32768);
       res.write(`event: ${event}\ndata: ${redacted}\n\n`);
     };
 

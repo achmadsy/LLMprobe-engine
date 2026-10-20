@@ -35,6 +35,10 @@ export interface ProbeResult {
   tps: number | null;
   response: string | null;
   error: string | null;
+  /** Scoring mode of the probe, for consumer-side expected/actual display. */
+  scoring?: string;
+  /** Expected/reference response (or containment keywords) for auditability. */
+  expected?: string | null;
 }
 
 export interface RunReport {
@@ -215,6 +219,70 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
     return {
       passed: scored.score >= threshold,
       reason: `Similarity score: ${scored.score}/10 (threshold: ${threshold}) — ${scored.reason}`,
+    };
+  } catch (e) {
+    return { passed: null, reason: `Judge call failed: ${(e as Error).message?.slice(0, 100)}` };
+  }
+}
+
+/**
+ * Rubric-based judge fallback for probes without a baseline entry: the judge
+ * LLM scores the candidate response against the probe question directly
+ * (instruction adherence, correctness, refusal-to-answer detection).
+ */
+async function runJudgeRubric(
+  judgeUrl: string,
+  apiKey: string,
+  modelId: string,
+  probe: ProbeDefinition,
+  candidateResponse: string,
+  threshold: number,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  fetchFn: typeof fetch = fetch,
+  customHeaders?: Record<string, string>,
+): Promise<{ passed: boolean | null; reason: string }> {
+  const judgePrompt = `You are grading an AI response against its original question.
+
+Question asked to the model under test:
+"${probe.prompt.slice(0, 500)}"
+
+Response under test:
+${candidateResponse.slice(0, 2000)}
+
+Score 1-10 on: instruction adherence, factual correctness, and whether the answer actually attempts the question (a refusal or empty answer scores 1-2).
+- 8-10: follows the instruction and answers correctly
+- 6-7: answers with minor issues
+- 1-5: ignores instructions, wrong, or refuses
+
+Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
+
+  try {
+    const judgeHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+    mergeCustomHeaders(judgeHeaders, customHeaders);
+    const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: judgeHeaders,
+      body: JSON.stringify({
+        model: modelId,
+        messages: [
+          { role: "system", content: "You are a strict JSON-only evaluator. Respond ONLY with the JSON object requested." },
+          { role: "user", content: judgePrompt },
+        ],
+        stream: false,
+        max_tokens: 256,
+        temperature: 0,
+      }),
+      signal: combineSignals(timeoutMs, signal),
+    });
+    if (!res.ok) return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
+    const data = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }> }>(res);
+    const text = data.choices?.[0]?.message?.content ?? "";
+    const scored = parseJudgeScore(text);
+    if (!scored) return { passed: null, reason: `Judge returned unparseable response: ${text.slice(0, 100)}` };
+    return {
+      passed: scored.score >= threshold,
+      reason: `Rubric score: ${scored.score}/10 (threshold: ${threshold}) — ${scored.reason}`,
     };
   } catch (e) {
     return { passed: null, reason: `Judge call failed: ${(e as Error).message?.slice(0, 100)}` };
@@ -809,7 +877,9 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       }
 
       // ── Auto-scoreable (exact_match, keyword_match, header_check, exact_response) ─
-      const autoResult = autoScore(probe, fullText, responseHeaders, canaryOverride);
+      // English is the canonical dashboard language; the dynamic canary rides
+      // in opts, not the lang slot.
+      const autoResult = autoScore(probe, fullText, responseHeaders, "en", { overrideExpectedExact: canaryOverride });
       let passed: true | false | "warning" | null = null;
       let passReason: string | null = null;
 
@@ -820,7 +890,8 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         passed = null;
         passReason = "identity feature probe — response collected for fingerprint analysis";
       } else if (probe.scoring === "llm_judge") {
-        // Use judge endpoint + baseline for similarity scoring
+        // Prefer baseline similarity; fall back to a rubric grade when the
+        // model has no published baseline so quality probes never sit gray.
         if (judge && baseline && baseline[probe.id]) {
           const judged = await runJudgeWithBaseline(
             judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText,
@@ -829,15 +900,17 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           );
           passed = judged.passed === null ? null : judged.passed ? true : false;
           passReason = judged.reason;
-        } else if (judge && !baseline) {
-          passed = null;
-          passReason = "llm_judge: no baseline provided — pass --baseline <file> or --fetch-baseline <url> to enable similarity scoring";
-        } else if (!judge) {
-          passed = null;
-          passReason = "llm_judge: no judge endpoint configured — pass --judge-base-url to enable auto-scoring";
+        } else if (judge) {
+          const judged = await runJudgeRubric(
+            judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText,
+            judge.threshold ?? 7, timeoutMs,
+            outerSignal, fetchImpl, judge.customHeaders,
+          );
+          passed = judged.passed === null ? null : judged.passed ? true : false;
+          passReason = judged.reason;
         } else {
           passed = null;
-          passReason = `llm_judge: no baseline entry for probe '${probe.id}' — run collect-baseline to build one`;
+          passReason = "llm_judge: no judge endpoint configured — pass --judge-base-url to enable auto-scoring";
         }
       }
 
@@ -846,9 +919,15 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
       }
 
+      // Surface the reference the response was judged against so the dashboard
+      // can show expected-vs-actual without reverse-engineering passReason.
+      const expected = probe.expectedExact ?? probe.expectedContains
+        ?? (probe.passIfContains?.length ? probe.passIfContains.join(" | ") : null);
+
       result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
         status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
-        response: fullText.slice(0, 4000), passed, passReason, error: null };
+        response: fullText.slice(0, 4000), passed, passReason, error: null,
+        scoring: probe.scoring, expected };
 
     } catch (err) {
       result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,

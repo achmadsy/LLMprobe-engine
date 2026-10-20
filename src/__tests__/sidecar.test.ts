@@ -166,7 +166,7 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
   });
 
   describe("Probe Catalog", () => {
-    it("returns the authoritative probe suite without prompts or scoring rules", async () => {
+    it("returns the authoritative suite with bounded question/expected metadata for the detail drawer", async () => {
       const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`, {
         headers: { Authorization: `Bearer ${TEST_TOKEN}` },
       });
@@ -183,9 +183,16 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
         label: expect.any(String),
         group: expect.any(String),
         description: expect.any(String),
+        scoring: expect.any(String),
       }));
-      expect(json.probes[0]).not.toHaveProperty("prompt");
-      expect(json.probes[0]).not.toHaveProperty("scoring");
+      // Prompts are exposed for the drawer but bounded, and no secret-bearing
+      // fields (systemPrompt, multimodal payloads) ever leave the engine.
+      expect(String(json.probes[0].prompt).length).toBeLessThanOrEqual(500);
+      for (const probe of json.probes) {
+        expect(probe).not.toHaveProperty("systemPrompt");
+        expect(probe).not.toHaveProperty("multimodalContent");
+        expect(probe).not.toHaveProperty("adaptiveTriggerPrompt");
+      }
     });
   });
 

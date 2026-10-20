@@ -178,7 +178,7 @@ const redaction_js_1 = require("../redaction.js");
         });
     });
     (0, vitest_1.describe)("Probe Catalog", () => {
-        (0, vitest_1.it)("returns the authoritative probe suite without prompts or scoring rules", async () => {
+        (0, vitest_1.it)("returns the authoritative suite with bounded question/expected metadata for the detail drawer", async () => {
             const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`, {
                 headers: { Authorization: `Bearer ${TEST_TOKEN}` },
             });
@@ -191,9 +191,16 @@ const redaction_js_1 = require("../redaction.js");
                 label: vitest_1.expect.any(String),
                 group: vitest_1.expect.any(String),
                 description: vitest_1.expect.any(String),
+                scoring: vitest_1.expect.any(String),
             }));
-            (0, vitest_1.expect)(json.probes[0]).not.toHaveProperty("prompt");
-            (0, vitest_1.expect)(json.probes[0]).not.toHaveProperty("scoring");
+            // Prompts are exposed for the drawer but bounded, and no secret-bearing
+            // fields (systemPrompt, multimodal payloads) ever leave the engine.
+            (0, vitest_1.expect)(String(json.probes[0].prompt).length).toBeLessThanOrEqual(500);
+            for (const probe of json.probes) {
+                (0, vitest_1.expect)(probe).not.toHaveProperty("systemPrompt");
+                (0, vitest_1.expect)(probe).not.toHaveProperty("multimodalContent");
+                (0, vitest_1.expect)(probe).not.toHaveProperty("adaptiveTriggerPrompt");
+            }
         });
     });
     (0, vitest_1.describe)("Model Discovery", () => {

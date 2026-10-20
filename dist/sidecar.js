@@ -44,7 +44,7 @@ const egress_guard_js_1 = require("./egress-guard.js");
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
 const probe_suite_js_1 = require("./probe-suite.js");
-exports.SIDECAR_VERSION = "0.11.1";
+exports.SIDECAR_VERSION = "0.12.0";
 exports.SIDECAR_LICENSE = "AGPL-3.0-only";
 exports.SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 class SidecarServer {
@@ -169,11 +169,16 @@ class SidecarServer {
     handleProbes(req, res) {
         if (!this.authenticate(req, res))
             return;
-        const probes = probe_suite_js_1.PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral }) => ({
+        const probes = probe_suite_js_1.PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
             id,
             label,
             group,
             description,
+            scoring,
+            // Bounded question/reference text for the detail drawer (About/Question/Expected).
+            prompt: prompt?.slice(0, 500) ?? null,
+            expected: expectedExact ?? expectedContains
+                ?? (passIfContains?.length ? passIfContains.join(" | ") : null),
             ...(optional ? { optional: true } : {}),
             ...(isNew ? { isNew: true } : {}),
             ...(neutral ? { neutral: true } : {}),
@@ -394,7 +399,14 @@ class SidecarServer {
             if (res.writableEnded)
                 return;
             const raw = typeof data === "string" ? data : JSON.stringify(data);
-            const redacted = (0, redaction_js_1.truncateString)((0, redaction_js_1.redactSecrets)(raw, secrets), 32768);
+            // The complete event carries the full sanitized report (identity
+            // assessment included); truncating it corrupts the JSON and silently
+            // destroys the verdict on the consumer. Everything is redacted, and
+            // per-result payloads are bounded upstream, so only debug-sized raw
+            // strings get the 32 KiB cap.
+            const redacted = event === "complete"
+                ? (0, redaction_js_1.redactSecrets)(raw, secrets)
+                : (0, redaction_js_1.truncateString)((0, redaction_js_1.redactSecrets)(raw, secrets), 32768);
             res.write(`event: ${event}\ndata: ${redacted}\n\n`);
         };
         // Abort if client drops HTTP connection

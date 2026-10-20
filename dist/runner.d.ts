@@ -16,6 +16,10 @@ export interface ProbeResult {
     tps: number | null;
     response: string | null;
     error: string | null;
+    /** Scoring mode of the probe, for consumer-side expected/actual display. */
+    scoring?: string;
+    /** Expected/reference response (or containment keywords) for auditability. */
+    expected?: string | null;
 }
 export interface RunReport {
     baseUrl: string;

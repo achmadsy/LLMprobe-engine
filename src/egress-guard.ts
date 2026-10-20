@@ -489,9 +489,17 @@ export function createSafeFetch(options?: EgressOptions): typeof fetch {
           currentHeaders.delete("content-length");
         }
 
-        // Cross-origin redirect: never leak the caller's Authorization header
+        // Cross-origin redirect: never leak the caller's credentials or the
+        // user-supplied additional headers to a different origin.
         if (previousOrigin !== nextUrl.origin) {
           currentHeaders.delete("authorization");
+          for (const name of [...currentHeaders.keys()]) {
+            if (name === "content-type") continue;
+            // Transport/credentials are handled above or by the 303 branch;
+            // anything else Header-set by the caller is treated as
+            // caller-controlled and stripped before following cross-origin.
+            currentHeaders.delete(name);
+          }
         }
 
         currentUrl = nextUrl;

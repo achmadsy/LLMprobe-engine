@@ -46,9 +46,23 @@ const redaction_js_1 = require("../redaction.js");
     let mockUpstream;
     let mockUpstreamPort;
     let delayUpstream = false;
+    let modelsAuthorization;
     (0, vitest_1.beforeAll)(async () => {
         // 1. Start mock OpenAI-compatible upstream
         mockUpstream = http.createServer((req, res) => {
+            if (req.method === "GET" && req.url === "/v1/models") {
+                modelsAuthorization = req.headers.authorization;
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    object: "list",
+                    data: [
+                        { id: "model-a", name: "Model A" },
+                        { id: "model-a", name: "Duplicate" },
+                        { model: "model-b" },
+                    ],
+                }));
+                return;
+            }
             if (req.method === "POST" && req.url === "/chat/completions") {
                 const chunks = [];
                 req.on("data", (chunk) => chunks.push(chunk));
@@ -136,6 +150,18 @@ const redaction_js_1 = require("../redaction.js");
             (0, vitest_1.expect)(json.license).toBe(sidecar_js_1.SIDECAR_LICENSE);
             (0, vitest_1.expect)(json.source).toBe(sidecar_js_1.SIDECAR_SOURCE);
         });
+        (0, vitest_1.it)("rejects GET /v1/probes with 401 when unauthenticated", async () => {
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`);
+            (0, vitest_1.expect)(res.status).toBe(401);
+        });
+        (0, vitest_1.it)("rejects POST /v1/models with 401 when unauthenticated", async () => {
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/models`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ baseUrl: "https://api.openai.com/v1" }),
+            });
+            (0, vitest_1.expect)(res.status).toBe(401);
+        });
         (0, vitest_1.it)("rejects POST /v1/runs with 401 when unauthenticated", async () => {
             const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
                 method: "POST",
@@ -149,6 +175,69 @@ const redaction_js_1 = require("../redaction.js");
                 method: "POST",
             });
             (0, vitest_1.expect)(res.status).toBe(401);
+        });
+    });
+    (0, vitest_1.describe)("Probe Catalog", () => {
+        (0, vitest_1.it)("returns the authoritative probe suite without prompts or scoring rules", async () => {
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`, {
+                headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+            });
+            (0, vitest_1.expect)(res.status).toBe(200);
+            const json = await res.json();
+            (0, vitest_1.expect)(json.version).toBe(sidecar_js_1.SIDECAR_VERSION);
+            (0, vitest_1.expect)(json.probes.length).toBeGreaterThan(0);
+            (0, vitest_1.expect)(json.probes[0]).toEqual(vitest_1.expect.objectContaining({
+                id: vitest_1.expect.any(String),
+                label: vitest_1.expect.any(String),
+                group: vitest_1.expect.any(String),
+                description: vitest_1.expect.any(String),
+            }));
+            (0, vitest_1.expect)(json.probes[0]).not.toHaveProperty("prompt");
+            (0, vitest_1.expect)(json.probes[0]).not.toHaveProperty("scoring");
+        });
+    });
+    (0, vitest_1.describe)("Model Discovery", () => {
+        (0, vitest_1.it)("fetches, normalizes, and deduplicates OpenAI-compatible models", async () => {
+            modelsAuthorization = undefined;
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/models`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${TEST_TOKEN}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    baseUrl: `http://127.0.0.1:${mockUpstreamPort}/v1`,
+                    apiKey: "sk-model-catalog-secret",
+                }),
+            });
+            (0, vitest_1.expect)(res.status).toBe(200);
+            (0, vitest_1.expect)(modelsAuthorization).toBe("Bearer sk-model-catalog-secret");
+            (0, vitest_1.expect)(await res.json()).toEqual({
+                models: [{ id: "model-a", name: "Model A" }, { id: "model-b" }],
+            });
+        });
+        (0, vitest_1.it)("blocks private model endpoints under strict egress policy", async () => {
+            const strictSidecar = (0, sidecar_js_1.createSidecarServer)({
+                bearerToken: TEST_TOKEN,
+                egressOptions: { allowedPorts: [80, 443] },
+            });
+            const bound = await strictSidecar.listen(0, "127.0.0.1");
+            try {
+                const res = await fetch(`http://127.0.0.1:${bound.port}/v1/models`, {
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${TEST_TOKEN}`,
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ baseUrl: "http://169.254.169.254/latest" }),
+                });
+                (0, vitest_1.expect)(res.status).toBe(400);
+                const json = await res.json();
+                (0, vitest_1.expect)(json.error.code).toBe("egress_blocked");
+            }
+            finally {
+                await strictSidecar.close();
+            }
         });
     });
     (0, vitest_1.describe)("Bounded Request Body", () => {
@@ -171,6 +260,38 @@ const redaction_js_1 = require("../redaction.js");
             (0, vitest_1.expect)(res.status).toBe(413);
             const json = await res.json();
             (0, vitest_1.expect)(json.error.code).toBe("payload_too_large");
+        });
+        (0, vitest_1.it)("accepts keyless runs against endpoints that do not require auth", async () => {
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${TEST_TOKEN}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    baseUrl: `http://127.0.0.1:${mockUpstreamPort}`,
+                    modelId: "keyless-model",
+                    timeoutMs: 5000,
+                }),
+            });
+            (0, vitest_1.expect)(res.status).toBe(200);
+            const text = await res.text();
+            (0, vitest_1.expect)(text).toContain("event: start");
+        });
+        (0, vitest_1.it)("rejects oversized apiKey values", async () => {
+            const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${TEST_TOKEN}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    baseUrl: `http://127.0.0.1:${mockUpstreamPort}`,
+                    apiKey: "k".repeat(10000),
+                    modelId: "test-model",
+                }),
+            });
+            (0, vitest_1.expect)(res.status).toBe(400);
         });
     });
     (0, vitest_1.describe)("Secret Redaction", () => {

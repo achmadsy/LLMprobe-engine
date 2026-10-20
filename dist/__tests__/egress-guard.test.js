@@ -143,8 +143,23 @@ const egress_guard_js_1 = require("../egress-guard.js");
     (0, vitest_1.describe)("Manual Redirect Defense", () => {
         let server;
         let serverPort;
-        // Start a test HTTP server on ephemeral port for redirect testing
+        let otherServer;
+        let otherServerPort;
+        let sameOriginAuthorization;
+        let crossOriginAuthorization;
+        // Start test HTTP servers on ephemeral ports for redirect testing
         (0, vitest_1.beforeAll)(async () => {
+            otherServer = http.createServer((req, res) => {
+                crossOriginAuthorization = req.headers.authorization;
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: true }));
+            });
+            await new Promise((resolve) => {
+                otherServer.listen(0, "127.0.0.1", () => {
+                    otherServerPort = otherServer.address().port;
+                    resolve();
+                });
+            });
             server = http.createServer((req, res) => {
                 if (req.url === "/redirect-to-private") {
                     res.writeHead(302, { Location: "http://127.0.0.1:80/admin" });
@@ -171,7 +186,13 @@ const egress_guard_js_1 = require("../egress-guard.js");
                     res.end();
                     return;
                 }
+                if (req.url === "/redirect-cross-origin") {
+                    res.writeHead(302, { Location: `http://127.0.0.1:${otherServerPort}/final-target` });
+                    res.end();
+                    return;
+                }
                 if (req.url === "/final-target") {
+                    sameOriginAuthorization = req.headers.authorization;
                     res.writeHead(200, { "Content-Type": "application/json" });
                     res.end(JSON.stringify({ ok: true, message: "arrived safely" }));
                     return;
@@ -189,6 +210,7 @@ const egress_guard_js_1 = require("../egress-guard.js");
         });
         (0, vitest_1.afterAll)(async () => {
             await new Promise((resolve) => server.close(() => resolve()));
+            await new Promise((resolve) => otherServer.close(() => resolve()));
         });
         (0, vitest_1.it)("blocks redirect to private/internal IP", async () => {
             // allowPrivate only for the initial connection to test server, but redirect will be validated
@@ -229,6 +251,28 @@ const egress_guard_js_1 = require("../egress-guard.js");
             const json = await res.json();
             (0, vitest_1.expect)(json.ok).toBe(true);
             (0, vitest_1.expect)(json.message).toBe("arrived safely");
+        });
+        (0, vitest_1.it)("keeps Authorization on same-origin redirects", async () => {
+            sameOriginAuthorization = undefined;
+            const safeFetch = (0, egress_guard_js_1.createSafeFetch)({
+                allowedPorts: [serverPort],
+                allowPrivate: true,
+            });
+            await safeFetch(`http://127.0.0.1:${serverPort}/redirect-safe`, {
+                headers: { Authorization: "Bearer keep-me" },
+            });
+            (0, vitest_1.expect)(sameOriginAuthorization).toBe("Bearer keep-me");
+        });
+        (0, vitest_1.it)("strips Authorization on cross-origin redirects", async () => {
+            crossOriginAuthorization = undefined;
+            const safeFetch = (0, egress_guard_js_1.createSafeFetch)({
+                allowedPorts: [serverPort, otherServerPort],
+                allowPrivate: true,
+            });
+            await safeFetch(`http://127.0.0.1:${serverPort}/redirect-cross-origin`, {
+                headers: { Authorization: "Bearer do-not-forward" },
+            });
+            (0, vitest_1.expect)(crossOriginAuthorization).toBeUndefined();
         });
     });
 });

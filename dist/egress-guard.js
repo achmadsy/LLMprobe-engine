@@ -464,8 +464,8 @@ function createSafeFetch(options) {
                     return res;
                 }
                 // Resolve redirect URL and validate against egress rules
-                const nextUrl = new URL(location, currentUrl);
-                currentUrl = validateUrl(nextUrl, options);
+                const previousOrigin = currentUrl.origin;
+                const nextUrl = validateUrl(new URL(location, currentUrl), options);
                 // Adjust method according to HTTP specs
                 if (res.status === 303 || ((res.status === 301 || res.status === 302) && currentMethod === "POST")) {
                     currentMethod = "GET";
@@ -474,9 +474,10 @@ function createSafeFetch(options) {
                     currentHeaders.delete("content-length");
                 }
                 // Cross-origin redirect: never leak the caller's Authorization header
-                if (currentUrl.origin !== nextUrl.origin) {
+                if (previousOrigin !== nextUrl.origin) {
                     currentHeaders.delete("authorization");
                 }
+                currentUrl = nextUrl;
                 continue;
             }
             return res;

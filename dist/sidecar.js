@@ -42,6 +42,7 @@ const crypto_1 = require("crypto");
 const runner_js_1 = require("./runner.js");
 const egress_guard_js_1 = require("./egress-guard.js");
 const redaction_js_1 = require("./redaction.js");
+const probe_suite_js_1 = require("./probe-suite.js");
 exports.SIDECAR_VERSION = "0.11.0";
 exports.SIDECAR_LICENSE = "AGPL-3.0-only";
 exports.SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
@@ -134,6 +135,132 @@ class SidecarServer {
             activeRun: this.getActiveRun(),
         }));
     }
+    async readBoundedResponse(response, maxBytes) {
+        if (!response.body)
+            return "";
+        const reader = response.body.getReader();
+        const chunks = [];
+        let totalBytes = 0;
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                totalBytes += value.byteLength;
+                if (totalBytes > maxBytes) {
+                    await reader.cancel("Response body too large");
+                    throw new Error(`Models response too large (max ${maxBytes} bytes)`);
+                }
+                chunks.push(value);
+            }
+        }
+        finally {
+            reader.releaseLock();
+        }
+        const body = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+            body.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+        return new TextDecoder().decode(body);
+    }
+    handleProbes(req, res) {
+        if (!this.authenticate(req, res))
+            return;
+        const probes = probe_suite_js_1.PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral }) => ({
+            id,
+            label,
+            group,
+            description,
+            ...(optional ? { optional: true } : {}),
+            ...(isNew ? { isNew: true } : {}),
+            ...(neutral ? { neutral: true } : {}),
+        }));
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ version: exports.SIDECAR_VERSION, probes }));
+    }
+    async handleModels(req, res) {
+        if (!this.authenticate(req, res))
+            return;
+        const maxBytes = this.config.maxBodyBytes ?? 1048576;
+        const rawBody = await this.readBoundedBody(req, res, maxBytes);
+        if (rawBody === null)
+            return;
+        let body;
+        try {
+            body = JSON.parse(rawBody);
+        }
+        catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "Invalid JSON request body", code: "bad_request" } }));
+            return;
+        }
+        const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
+        const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+        if (!baseUrl || baseUrl.length > 4096 || apiKey.length > 8192) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "Invalid baseUrl or apiKey", code: "bad_request" } }));
+            return;
+        }
+        const secrets = [apiKey, this.configuredToken]
+            .filter((secret) => typeof secret === "string" && secret.length > 0);
+        try {
+            const parsed = (0, egress_guard_js_1.validateUrl)(baseUrl, this.config.egressOptions);
+            const basePath = parsed.pathname.replace(/\/+$/, "");
+            parsed.pathname = basePath.endsWith("/models") ? basePath : `${basePath}/models`;
+            parsed.search = "";
+            parsed.hash = "";
+            const headers = new Headers({ accept: "application/json" });
+            if (apiKey)
+                headers.set("authorization", `Bearer ${apiKey}`);
+            const safeFetch = (0, egress_guard_js_1.createSafeFetch)(this.config.egressOptions);
+            const response = await safeFetch(parsed, {
+                method: "GET",
+                headers,
+                signal: (0, egress_guard_js_1.combineSignals)(10000),
+            });
+            if (!response.ok) {
+                res.writeHead(502, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({
+                    error: {
+                        message: `Upstream models endpoint returned HTTP ${response.status}`,
+                        code: "upstream_error",
+                    },
+                }));
+                return;
+            }
+            const responseText = await this.readBoundedResponse(response, 1048576);
+            const payload = JSON.parse(responseText);
+            const container = payload && typeof payload === "object" ? payload : {};
+            const rawModels = Array.isArray(payload)
+                ? payload
+                : [container.data, container.models, container.results].find(Array.isArray) ?? [];
+            const seen = new Set();
+            const models = [];
+            for (const item of rawModels) {
+                const record = item && typeof item === "object" ? item : null;
+                const rawId = record?.id ?? record?.model ?? record?.name ?? item;
+                const id = typeof rawId === "string" ? rawId.trim() : "";
+                if (!id || id.length > 512 || seen.has(id))
+                    continue;
+                seen.add(id);
+                const rawName = record?.name;
+                const name = typeof rawName === "string" ? rawName.trim().slice(0, 512) : "";
+                models.push(name && name !== id ? { id, name } : { id });
+                if (models.length >= 10000)
+                    break;
+            }
+            res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+            res.end(JSON.stringify({ models }));
+        }
+        catch (err) {
+            const status = err instanceof egress_guard_js_1.EgressError ? 400 : 502;
+            const code = err instanceof egress_guard_js_1.EgressError ? "egress_blocked" : "models_fetch_failed";
+            res.writeHead(status, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: (0, redaction_js_1.boundError)(err, 1000, secrets), code } }));
+        }
+    }
     async handleRuns(req, res) {
         if (!this.authenticate(req, res))
             return;
@@ -162,10 +289,17 @@ class SidecarServer {
             res.end(JSON.stringify({ error: { message: "Invalid JSON request body", code: "bad_request" } }));
             return;
         }
-        // Required fields
-        if (!body.baseUrl || !body.apiKey || !body.modelId) {
+        // Required fields — apiKey may be omitted for endpoints that require no auth
+        if (!body.baseUrl || !body.modelId) {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: { message: "Missing required fields: baseUrl, apiKey, modelId", code: "bad_request" } }));
+            res.end(JSON.stringify({ error: { message: "Missing required fields: baseUrl, modelId", code: "bad_request" } }));
+            return;
+        }
+        if (typeof body.apiKey !== "string")
+            body.apiKey = "";
+        if (body.apiKey.length > 8192 || body.baseUrl.length > 4096) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "Invalid baseUrl or apiKey length", code: "bad_request" } }));
             return;
         }
         // Egress verification for target and optional external endpoints
@@ -277,6 +411,19 @@ class SidecarServer {
         const [path] = rawUrl.split("?");
         if (req.method === "GET" && (path === "/health" || path === "/_probe_health")) {
             this.handleHealth(req, res);
+            return;
+        }
+        if (req.method === "GET" && path === "/v1/probes") {
+            this.handleProbes(req, res);
+            return;
+        }
+        if (req.method === "POST" && path === "/v1/models") {
+            this.handleModels(req, res).catch(() => {
+                if (!res.headersSent) {
+                    res.writeHead(500, { "Content-Type": "application/json" });
+                    res.end(JSON.stringify({ error: { message: "Internal server error", code: "server_error" } }));
+                }
+            });
             return;
         }
         if (req.method === "POST" && path === "/v1/runs") {

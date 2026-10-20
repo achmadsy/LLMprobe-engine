@@ -29,6 +29,9 @@ export declare class SidecarServer {
     private authenticate;
     private readBoundedBody;
     private handleHealth;
+    private readBoundedResponse;
+    private handleProbes;
+    private handleModels;
     private handleRuns;
     private handleCancel;
     private handleRequest;

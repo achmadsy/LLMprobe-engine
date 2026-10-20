@@ -16,6 +16,7 @@ import { embedProbeResponses, pickTopVectorScores, type ReferenceEmbedding } fro
 import { fuseScores } from "./fingerprint-fusion.js";
 import type { IdentityAssessment } from "./identity-report.js";
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions } from "./egress-guard.js";
+import { mergeCustomHeaders } from "./custom-headers.js";
 
 export interface ProbeResult {
   probeId: string;
@@ -64,6 +65,8 @@ export interface RunOptions {
   timeoutMs?: number;
   /** Called after each probe completes */
   onProgress?: (result: ProbeResult, index: number, total: number) => void;
+  /** Extra headers merged into every target-phase request (never overrides Authorization/Content-Type/probe extras). */
+  customHeaders?: Record<string, string>;
   /** Judge endpoint for llm_judge probes (optional; skipped if absent) */
   judge?: {
     baseUrl: string;
@@ -71,6 +74,8 @@ export interface RunOptions {
     modelId: string;
     /** Score threshold 1-10. Default: 7 */
     threshold?: number;
+    /** Extra headers sent only on judge requests. */
+    customHeaders?: Record<string, string>;
   };
   /**
    * Baseline responses to compare against during llm_judge scoring.
@@ -146,6 +151,7 @@ async function runJudgeWithBaseline(
   timeoutMs: number,
   signal?: AbortSignal,
   fetchFn: typeof fetch = fetch,
+  customHeaders?: Record<string, string>,
 ): Promise<{ passed: boolean | null; reason: string }> {
   const judgePrompt = `You are evaluating whether two AI responses are from the same underlying model.
 
@@ -166,9 +172,11 @@ Score how similar these responses are on a scale of 1-10, where:
 Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
 
   try {
+    const judgeHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+    mergeCustomHeaders(judgeHeaders, customHeaders);
     const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: judgeHeaders,
       body: JSON.stringify({
         model: modelId,
         messages: [
@@ -205,6 +213,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     onProgress,
     judge,
     baseline,
+    customHeaders,
   } = options;
 
   if (options.signal?.aborted) {
@@ -228,10 +237,13 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
   const results: ProbeResult[] = [];
 
   // ── Pre-flight ────────────────────────────────────────────────────────────
+  const targetHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+  mergeCustomHeaders(targetHeaders, customHeaders);
+
   try {
     const pfRes = await fetchImpl(chatUrl, {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: targetHeaders,
       body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
       signal: combineSignals(45_000, outerSignal),
     });
@@ -264,10 +276,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     if (probe.scoring === "channel_signature") {
       const t0 = Date.now();
       try {
+        const sigHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+        mergeCustomHeaders(sigHeaders, customHeaders);
         const r = await fetchImpl(chatUrl, {
           method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: probe.maxTokens ?? 16 }),
+          headers: sigHeaders,
           signal: combineSignals(timeoutMs, outerSignal),
         });
         const dur = Date.now() - t0;
@@ -307,10 +320,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       const t0 = Date.now();
       const makeRequest = async (prompt: string): Promise<string | null> => {
         try {
+          const acHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+          mergeCustomHeaders(acHeaders, customHeaders);
           const r = await fetchImpl(chatUrl, {
             method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: false, max_tokens: 256, temperature: 0 }),
+            headers: acHeaders,
             signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) return null;
@@ -349,9 +363,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     if (probe.scoring === "thinking_check") {
       const t0 = Date.now();
       try {
+        const tcHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" };
+        mergeCustomHeaders(tcHeaders, customHeaders);
         const r = await fetchImpl(chatUrl, {
           method: "POST",
-          headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" },
+          headers: tcHeaders,
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, max_tokens: 2048, thinking: { type: "enabled", budget_tokens: 1024 } }),
           signal: combineSignals(timeoutMs, outerSignal),
         });
@@ -411,10 +427,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       for (let i = 0; i < 2; i++) {
         if (outerSignal?.aborted) break;
         try {
+          const ccHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+          mergeCustomHeaders(ccHeaders, customHeaders);
           const r = await fetchImpl(chatUrl, {
             method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: 32, temperature: 0.7 }),
+            headers: ccHeaders,
             signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) { responses.push("__ERROR__"); continue; }
@@ -440,9 +457,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     // ── context_check ──────────────────────────────────────────────────────
     if (probe.scoring === "context_check") {
       const sendFn = async (message: string) => {
+        const cxHeaders: Record<string, string> = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
+        mergeCustomHeaders(cxHeaders, customHeaders);
         const r = await fetchImpl(chatUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+          headers: cxHeaders,
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], max_tokens: 256, stream: false }),
           signal: combineSignals(timeoutMs, outerSignal),
         });
@@ -516,9 +535,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       let inputTokens: number | null = null;
       let outputTokens: number | null = null;
 
+      const stdHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+      mergeCustomHeaders(stdHeaders, customHeaders);
       const res = await fetchImpl(chatUrl, {
         method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        headers: stdHeaders,
         body: JSON.stringify({
           model: modelId,
           messages,
@@ -626,7 +647,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           const judged = await runJudgeWithBaseline(
             judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText,
             baseline[probe.id], judge.threshold ?? 7, timeoutMs,
-            outerSignal, fetchImpl,
+            outerSignal, fetchImpl, judge.customHeaders,
           );
           passed = judged.passed === null ? null : judged.passed ? true : false;
           passReason = judged.reason;

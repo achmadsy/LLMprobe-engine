@@ -14,10 +14,24 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
   let mockUpstream: http.Server;
   let mockUpstreamPort: number;
   let delayUpstream = false;
+  let modelsAuthorization: string | undefined;
 
   beforeAll(async () => {
     // 1. Start mock OpenAI-compatible upstream
     mockUpstream = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/v1/models") {
+        modelsAuthorization = req.headers.authorization;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          object: "list",
+          data: [
+            { id: "model-a", name: "Model A" },
+            { id: "model-a", name: "Duplicate" },
+            { model: "model-b" },
+          ],
+        }));
+        return;
+      }
       if (req.method === "POST" && req.url === "/chat/completions") {
         const chunks: Buffer[] = [];
         req.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -120,6 +134,15 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
       expect(json.source).toBe(SIDECAR_SOURCE);
     });
 
+    it("rejects POST /v1/models with 401 when unauthenticated", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/models`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ baseUrl: "https://api.openai.com/v1" }),
+      });
+      expect(res.status).toBe(401);
+    });
+
     it("rejects POST /v1/runs with 401 when unauthenticated", async () => {
       const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
         method: "POST",
@@ -134,6 +157,52 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
         method: "POST",
       });
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe("Model Discovery", () => {
+    it("fetches, normalizes, and deduplicates OpenAI-compatible models", async () => {
+      modelsAuthorization = undefined;
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/models`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TEST_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseUrl: `http://127.0.0.1:${mockUpstreamPort}/v1`,
+          apiKey: "sk-model-catalog-secret",
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(modelsAuthorization).toBe("Bearer sk-model-catalog-secret");
+      expect(await res.json()).toEqual({
+        models: [{ id: "model-a", name: "Model A" }, { id: "model-b" }],
+      });
+    });
+
+    it("blocks private model endpoints under strict egress policy", async () => {
+      const strictSidecar = createSidecarServer({
+        bearerToken: TEST_TOKEN,
+        egressOptions: { allowedPorts: [80, 443] },
+      });
+      const bound = await strictSidecar.listen(0, "127.0.0.1");
+      try {
+        const res = await fetch(`http://127.0.0.1:${bound.port}/v1/models`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${TEST_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ baseUrl: "http://169.254.169.254/latest" }),
+        });
+        expect(res.status).toBe(400);
+        const json = await res.json() as { error: { code: string } };
+        expect(json.error.code).toBe("egress_blocked");
+      } finally {
+        await strictSidecar.close();
+      }
     });
   });
 
@@ -159,6 +228,42 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
       expect(res.status).toBe(413);
       const json = await res.json() as { error: { code: string } };
       expect(json.error.code).toBe("payload_too_large");
+    });
+
+    it("accepts keyless runs against endpoints that do not require auth", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TEST_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseUrl: `http://127.0.0.1:${mockUpstreamPort}`,
+          modelId: "keyless-model",
+          timeoutMs: 5000,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain("event: start");
+    });
+
+    it("rejects oversized apiKey values", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${TEST_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          baseUrl: `http://127.0.0.1:${mockUpstreamPort}`,
+          apiKey: "k".repeat(10_000),
+          modelId: "test-model",
+        }),
+      });
+
+      expect(res.status).toBe(400);
     });
   });
 

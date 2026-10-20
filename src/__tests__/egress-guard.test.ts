@@ -149,9 +149,25 @@ describe("Egress Guard — SSRF & IP Validation", () => {
   describe("Manual Redirect Defense", () => {
     let server: http.Server;
     let serverPort: number;
+    let otherServer: http.Server;
+    let otherServerPort: number;
+    let sameOriginAuthorization: string | undefined;
+    let crossOriginAuthorization: string | undefined;
 
-    // Start a test HTTP server on ephemeral port for redirect testing
+    // Start test HTTP servers on ephemeral ports for redirect testing
     beforeAll(async () => {
+      otherServer = http.createServer((req, res) => {
+        crossOriginAuthorization = req.headers.authorization;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+      await new Promise<void>((resolve) => {
+        otherServer.listen(0, "127.0.0.1", () => {
+          otherServerPort = (otherServer.address() as { port: number }).port;
+          resolve();
+        });
+      });
+
       server = http.createServer((req, res) => {
         if (req.url === "/redirect-to-private") {
           res.writeHead(302, { Location: "http://127.0.0.1:80/admin" });
@@ -178,7 +194,13 @@ describe("Egress Guard — SSRF & IP Validation", () => {
           res.end();
           return;
         }
+        if (req.url === "/redirect-cross-origin") {
+          res.writeHead(302, { Location: `http://127.0.0.1:${otherServerPort}/final-target` });
+          res.end();
+          return;
+        }
         if (req.url === "/final-target") {
+          sameOriginAuthorization = req.headers.authorization;
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, message: "arrived safely" }));
           return;
@@ -198,6 +220,7 @@ describe("Egress Guard — SSRF & IP Validation", () => {
 
     afterAll(async () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => otherServer.close(() => resolve()));
     });
 
     it("blocks redirect to private/internal IP", async () => {
@@ -253,6 +276,30 @@ describe("Egress Guard — SSRF & IP Validation", () => {
       const json = await res.json() as { ok: boolean; message: string };
       expect(json.ok).toBe(true);
       expect(json.message).toBe("arrived safely");
+    });
+
+    it("keeps Authorization on same-origin redirects", async () => {
+      sameOriginAuthorization = undefined;
+      const safeFetch = createSafeFetch({
+        allowedPorts: [serverPort],
+        allowPrivate: true,
+      });
+      await safeFetch(`http://127.0.0.1:${serverPort}/redirect-safe`, {
+        headers: { Authorization: "Bearer keep-me" },
+      });
+      expect(sameOriginAuthorization).toBe("Bearer keep-me");
+    });
+
+    it("strips Authorization on cross-origin redirects", async () => {
+      crossOriginAuthorization = undefined;
+      const safeFetch = createSafeFetch({
+        allowedPorts: [serverPort, otherServerPort],
+        allowPrivate: true,
+      });
+      await safeFetch(`http://127.0.0.1:${serverPort}/redirect-cross-origin`, {
+        headers: { Authorization: "Bearer do-not-forward" },
+      });
+      expect(crossOriginAuthorization).toBeUndefined();
     });
   });
 });

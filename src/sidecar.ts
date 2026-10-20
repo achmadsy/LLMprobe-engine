@@ -4,7 +4,7 @@
 import * as http from "http";
 import { randomUUID } from "crypto";
 import { runProbes, type RunOptions, type RunReport, type ProbeResult } from "./runner.js";
-import { validateUrl, type EgressOptions, EgressError } from "./egress-guard.js";
+import { combineSignals, createSafeFetch, validateUrl, type EgressOptions, EgressError } from "./egress-guard.js";
 import { redactSecrets, truncateString, boundError, sanitizeProbeResult, sanitizeReport } from "./redaction.js";
 
 export interface SidecarConfig {
@@ -133,6 +133,121 @@ export class SidecarServer {
     );
   }
 
+  private async readBoundedResponse(response: Response, maxBytes: number): Promise<string> {
+    if (!response.body) return "";
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalBytes = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          await reader.cancel("Response body too large");
+          throw new Error(`Models response too large (max ${maxBytes} bytes)`);
+        }
+        chunks.push(value);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const body = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      body.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(body);
+  }
+
+  private async handleModels(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.authenticate(req, res)) return;
+
+    const maxBytes = this.config.maxBodyBytes ?? 1_048_576;
+    const rawBody = await this.readBoundedBody(req, res, maxBytes);
+    if (rawBody === null) return;
+
+    let body: { baseUrl?: unknown; apiKey?: unknown };
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid JSON request body", code: "bad_request" } }));
+      return;
+    }
+
+    const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
+    const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : "";
+    if (!baseUrl || baseUrl.length > 4096 || apiKey.length > 8192) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid baseUrl or apiKey", code: "bad_request" } }));
+      return;
+    }
+
+    const secrets = [apiKey, this.configuredToken]
+      .filter((secret): secret is string => typeof secret === "string" && secret.length > 0);
+
+    try {
+      const parsed = validateUrl(baseUrl, this.config.egressOptions);
+      const basePath = parsed.pathname.replace(/\/+$/, "");
+      parsed.pathname = basePath.endsWith("/models") ? basePath : `${basePath}/models`;
+      parsed.search = "";
+      parsed.hash = "";
+
+      const headers = new Headers({ accept: "application/json" });
+      if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
+      const safeFetch = createSafeFetch(this.config.egressOptions);
+      const response = await safeFetch(parsed, {
+        method: "GET",
+        headers,
+        signal: combineSignals(10_000),
+      });
+
+      if (!response.ok) {
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          error: {
+            message: `Upstream models endpoint returned HTTP ${response.status}`,
+            code: "upstream_error",
+          },
+        }));
+        return;
+      }
+
+      const responseText = await this.readBoundedResponse(response, 1_048_576);
+      const payload = JSON.parse(responseText) as unknown;
+      const container = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      const rawModels = Array.isArray(payload)
+        ? payload
+        : [container.data, container.models, container.results].find(Array.isArray) ?? [];
+      const seen = new Set<string>();
+      const models: Array<{ id: string; name?: string }> = [];
+
+      for (const item of rawModels as unknown[]) {
+        const record = item && typeof item === "object" ? item as Record<string, unknown> : null;
+        const rawId = record?.id ?? record?.model ?? record?.name ?? item;
+        const id = typeof rawId === "string" ? rawId.trim() : "";
+        if (!id || id.length > 512 || seen.has(id)) continue;
+        seen.add(id);
+        const rawName = record?.name;
+        const name = typeof rawName === "string" ? rawName.trim().slice(0, 512) : "";
+        models.push(name && name !== id ? { id, name } : { id });
+        if (models.length >= 10_000) break;
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ models }));
+    } catch (err) {
+      const status = err instanceof EgressError ? 400 : 502;
+      const code = err instanceof EgressError ? "egress_blocked" : "models_fetch_failed";
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: boundError(err, 1000, secrets), code } }));
+    }
+  }
+
   private async handleRuns(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     if (!this.authenticate(req, res)) return;
 
@@ -164,10 +279,16 @@ export class SidecarServer {
       return;
     }
 
-    // Required fields
-    if (!body.baseUrl || !body.apiKey || !body.modelId) {
+    // Required fields — apiKey may be omitted for endpoints that require no auth
+    if (!body.baseUrl || !body.modelId) {
       res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "Missing required fields: baseUrl, apiKey, modelId", code: "bad_request" } }));
+      res.end(JSON.stringify({ error: { message: "Missing required fields: baseUrl, modelId", code: "bad_request" } }));
+      return;
+    }
+    if (typeof body.apiKey !== "string") body.apiKey = "";
+    if (body.apiKey.length > 8192 || body.baseUrl.length > 4096) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid baseUrl or apiKey length", code: "bad_request" } }));
       return;
     }
 
@@ -285,6 +406,16 @@ export class SidecarServer {
 
     if (req.method === "GET" && (path === "/health" || path === "/_probe_health")) {
       this.handleHealth(req, res);
+      return;
+    }
+
+    if (req.method === "POST" && path === "/v1/models") {
+      this.handleModels(req, res).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "Internal server error", code: "server_error" } }));
+        }
+      });
       return;
     }
 

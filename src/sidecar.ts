@@ -24,7 +24,7 @@ export interface ActiveRunState {
   abortController: AbortController;
 }
 
-export const SIDECAR_VERSION = "0.11.0";
+export const SIDECAR_VERSION = "0.11.1";
 export const SIDECAR_LICENSE = "AGPL-3.0-only";
 export const SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 

@@ -44,7 +44,7 @@ const egress_guard_js_1 = require("./egress-guard.js");
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
 const probe_suite_js_1 = require("./probe-suite.js");
-exports.SIDECAR_VERSION = "0.11.0";
+exports.SIDECAR_VERSION = "0.11.1";
 exports.SIDECAR_LICENSE = "AGPL-3.0-only";
 exports.SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 class SidecarServer {

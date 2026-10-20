@@ -25,7 +25,8 @@ export type ScoringMode =
   | "adaptive_check"
   | "context_check"
   | "feature_extract"
-  | "channel_signature";
+  | "channel_signature"
+  | "signature_verify";
 
 export interface ProbeDefinition {
   id: string;
@@ -1273,6 +1274,16 @@ export const PROBE_SUITE: ProbeDefinition[] = [
     neutral: true,
     maxTokens: 120,
   },
+  {
+    id: "ac5_signature_verify",
+    label: "Anthropic 思考簽章驗證",
+    group: "signature",
+    scoring: "signature_verify",
+    acCategory: "AC-5",
+    description: "透過 Anthropic extended-thinking 簽章回放驗證上游真偽 (AC-5: thinking signature verification)。",
+    prompt: "Think step by step: what is 17 × 23?",
+    maxTokens: 1024,
+  },
 ];
 
 /** Prompts compatible with the existing model-evaluator (all except cache_detection and identity probes) */
@@ -1447,6 +1458,9 @@ export function autoScore(
     case "thinking_check":
     case "consistency_check":
     case "context_check":
+    case "channel_signature":
+    case "signature_verify":
+    case "feature_extract":
     case "llm_judge":
     case "human_review":
       return null;

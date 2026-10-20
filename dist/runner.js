@@ -12,10 +12,21 @@ const context_check_js_1 = require("./context-check.js");
 const fingerprint_extractor_js_1 = require("./fingerprint-extractor.js");
 const candidate_matcher_js_1 = require("./candidate-matcher.js");
 const channel_signature_js_1 = require("./channel-signature.js");
+const signature_probe_js_1 = require("./signature-probe.js");
 const fingerprint_judge_js_1 = require("./fingerprint-judge.js");
 const fingerprint_vectors_js_1 = require("./fingerprint-vectors.js");
 const fingerprint_fusion_js_1 = require("./fingerprint-fusion.js");
 const egress_guard_js_1 = require("./egress-guard.js");
+const custom_headers_js_1 = require("./custom-headers.js");
+const redaction_js_1 = require("./redaction.js");
+/** Cap for reading the non-OK preflight response body before classification. */
+const MAX_PREFLIGHT_RESPONSE_BYTES = 64 * 1024;
+/** Cap for total bytes accumulated from a streaming (SSE) probe response. */
+const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
+/** Bounded body read + parse so a hostile upstream can't buffer unlimited bytes. */
+async function readBoundedJson(res, maxBytes = signature_probe_js_1.MAX_SIGNATURE_RESPONSE_BYTES) {
+    return JSON.parse(await (0, signature_probe_js_1.readBoundedResponse)(res, maxBytes));
+}
 function parseJudgeScore(text) {
     const candidates = [];
     const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
@@ -41,7 +52,7 @@ function parseJudgeScore(text) {
  * Runs the similarity-based judge — mirrors `buildJudgePrompt` in the production route.
  * Judge scores 1-10: how similar is the candidate response to the baseline response?
  */
-async function runJudgeWithBaseline(judgeUrl, apiKey, modelId, probe, candidateResponse, baselineResponse, threshold, timeoutMs, signal, fetchFn = fetch) {
+async function runJudgeWithBaseline(judgeUrl, apiKey, modelId, probe, candidateResponse, baselineResponse, threshold, timeoutMs, signal, fetchFn = fetch, customHeaders) {
     const judgePrompt = `You are evaluating whether two AI responses are from the same underlying model.
 
 Original probe question: "${probe.prompt.slice(0, 300)}"
@@ -60,9 +71,11 @@ Score how similar these responses are on a scale of 1-10, where:
 
 Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>"}`;
     try {
+        const judgeHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+        (0, custom_headers_js_1.mergeCustomHeaders)(judgeHeaders, customHeaders);
         const res = await fetchFn(`${judgeUrl.replace(/\/$/, "")}/chat/completions`, {
             method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            headers: judgeHeaders,
             body: JSON.stringify({
                 model: modelId,
                 messages: [
@@ -77,7 +90,7 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
         });
         if (!res.ok)
             return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
-        const data = await res.json();
+        const data = await readBoundedJson(res);
         const text = data.choices?.[0]?.message?.content ?? "";
         const scored = parseJudgeScore(text);
         if (!scored)
@@ -92,7 +105,7 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
     }
 }
 async function runProbes(options) {
-    const { baseUrl, apiKey, modelId, includeOptional = false, timeoutMs = 180000, onProgress, judge, baseline, } = options;
+    const { baseUrl, apiKey, modelId, includeOptional = false, timeoutMs = 180000, onProgress, judge, baseline, customHeaders, } = options;
     if (options.signal?.aborted) {
         throw new Error(`Probe run aborted: ${options.signal.reason || "aborted"}`);
     }
@@ -107,20 +120,23 @@ async function runProbes(options) {
     }
     const fetchImpl = options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch);
     const outerSignal = options.signal;
+    const targetSecrets = [apiKey, ...(0, custom_headers_js_1.customHeaderSecrets)(customHeaders)];
     const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const startedAt = new Date().toISOString();
     const probes = probe_suite_js_1.PROBE_SUITE.filter(p => includeOptional || !p.optional);
     const results = [];
     // ── Pre-flight ────────────────────────────────────────────────────────────
+    const targetHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+    (0, custom_headers_js_1.mergeCustomHeaders)(targetHeaders, customHeaders);
     try {
         const pfRes = await fetchImpl(chatUrl, {
             method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+            headers: targetHeaders,
             body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
             signal: (0, egress_guard_js_1.combineSignals)(45000, outerSignal),
         });
         if (!pfRes.ok) {
-            const rawBody = await pfRes.text().catch(() => "");
+            const rawBody = await (0, signature_probe_js_1.readBoundedResponse)(pfRes, MAX_PREFLIGHT_RESPONSE_BYTES).catch(() => "");
             const { outcome, reason } = (0, probe_preflight_js_1.classifyPreflightResult)(pfRes.status, rawBody);
             if (outcome === "abort") {
                 for (const probe of probes) {
@@ -147,14 +163,16 @@ async function runProbes(options) {
         if (probe.scoring === "channel_signature") {
             const t0 = Date.now();
             try {
+                const sigHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+                (0, custom_headers_js_1.mergeCustomHeaders)(sigHeaders, customHeaders);
                 const r = await fetchImpl(chatUrl, {
                     method: "POST",
-                    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: probe.maxTokens ?? 16 }),
+                    headers: sigHeaders,
                     signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
                 const dur = Date.now() - t0;
-                const bodyText = await r.text();
+                // 128 KiB bound keeps a hostile upstream from exhausting runner memory.
+                const bodyText = await (0, signature_probe_js_1.readBoundedResponse)(r, signature_probe_js_1.MAX_SIGNATURE_RESPONSE_BYTES).catch(() => r.text().then((t) => t.slice(0, signature_probe_js_1.MAX_SIGNATURE_RESPONSE_BYTES)));
                 const responseHeaders = {};
                 r.headers.forEach((val, key) => { responseHeaders[key.toLowerCase()] = val; });
                 let messageId = null;
@@ -193,15 +211,16 @@ async function runProbes(options) {
             const t0 = Date.now();
             const makeRequest = async (prompt) => {
                 try {
+                    const acHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+                    (0, custom_headers_js_1.mergeCustomHeaders)(acHeaders, customHeaders);
                     const r = await fetchImpl(chatUrl, {
                         method: "POST",
-                        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-                        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: false, max_tokens: 256, temperature: 0 }),
+                        headers: acHeaders,
                         signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
                     if (!r.ok)
                         return null;
-                    const d = await r.json();
+                    const d = await readBoundedJson(r);
                     return (d.choices?.[0]?.message?.content ?? "").trim();
                 }
                 catch {
@@ -238,9 +257,11 @@ async function runProbes(options) {
         if (probe.scoring === "thinking_check") {
             const t0 = Date.now();
             try {
+                const tcHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" };
+                (0, custom_headers_js_1.mergeCustomHeaders)(tcHeaders, customHeaders);
                 const r = await fetchImpl(chatUrl, {
                     method: "POST",
-                    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" },
+                    headers: tcHeaders,
                     body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, max_tokens: 2048, thinking: { type: "enabled", budget_tokens: 1024 } }),
                     signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
@@ -322,17 +343,18 @@ async function runProbes(options) {
                 if (outerSignal?.aborted)
                     break;
                 try {
+                    const ccHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+                    (0, custom_headers_js_1.mergeCustomHeaders)(ccHeaders, customHeaders);
                     const r = await fetchImpl(chatUrl, {
                         method: "POST",
-                        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-                        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: 32, temperature: 0.7 }),
+                        headers: ccHeaders,
                         signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
                     if (!r.ok) {
                         responses.push("__ERROR__");
                         continue;
                     }
-                    const d = await r.json();
+                    const d = await readBoundedJson(r);
                     responses.push((d.choices?.[0]?.message?.content ?? "").trim());
                     if (i === 0) {
                         inTok = d.usage?.prompt_tokens ?? null;
@@ -359,13 +381,15 @@ async function runProbes(options) {
         // ── context_check ──────────────────────────────────────────────────────
         if (probe.scoring === "context_check") {
             const sendFn = async (message) => {
+                const cxHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` };
+                (0, custom_headers_js_1.mergeCustomHeaders)(cxHeaders, customHeaders);
                 const r = await fetchImpl(chatUrl, {
                     method: "POST",
-                    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+                    headers: cxHeaders,
                     body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], max_tokens: 256, stream: false }),
                     signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
-                const j = await r.json();
+                const j = await readBoundedJson(r);
                 return j.choices?.[0]?.message?.content ?? "";
             };
             try {
@@ -377,6 +401,149 @@ async function runProbes(options) {
             catch (e) {
                 result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                     status: "error", passed: null, passReason: null, ttftMs: null, durationMs: null, inputTokens: null, outputTokens: null, tps: null, response: null, error: e.message?.slice(0, 300) ?? "Unknown error" };
+            }
+            results.push(result);
+            onProgress?.(result, idx, probes.length);
+            continue;
+        }
+        // ── signature_verify (AC-5) ──────────────────────────────────────────
+        if (probe.scoring === "signature_verify") {
+            const t0 = Date.now();
+            try {
+                const messagesUrl = baseUrl.endsWith("/messages")
+                    ? baseUrl
+                    : `${baseUrl.replace(/\/chat\/completions\/?$/, "").replace(/\/$/, "")}/messages`;
+                if (options.egressOptions)
+                    (0, egress_guard_js_1.validateUrl)(messagesUrl, options.egressOptions);
+                const authHeader = apiKey.startsWith("sk-ant-")
+                    ? "x-api-key"
+                    : "authorization";
+                const initHeaders = {
+                    "content-type": "application/json",
+                    "anthropic-version": "2023-06-01",
+                    ...(authHeader === "x-api-key"
+                        ? { "x-api-key": apiKey }
+                        : { authorization: `Bearer ${apiKey}` }),
+                };
+                (0, custom_headers_js_1.mergeCustomHeaders)(initHeaders, customHeaders);
+                const r1 = await fetchImpl(messagesUrl, {
+                    method: "POST",
+                    headers: initHeaders,
+                    body: JSON.stringify({
+                        model: modelId,
+                        max_tokens: Math.max(probe.maxTokens ?? 1536, 1536),
+                        thinking: (0, signature_probe_js_1.getThinkingConfig)(modelId),
+                        messages: [{ role: "user", content: probe.prompt }],
+                    }),
+                    signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
+                });
+                const initialBodyText = await (0, signature_probe_js_1.readBoundedResponse)(r1);
+                if (!r1.ok) {
+                    const errBody = (0, redaction_js_1.redactSecrets)(initialBodyText, targetSecrets);
+                    const dur = Date.now() - t0;
+                    result = {
+                        probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                        status: "done", passed: false,
+                        passReason: `Initial request failed (HTTP ${r1.status}): ${errBody.slice(0, 200) || "error"}`,
+                        ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+                        response: null, error: errBody.slice(0, 300) || `HTTP ${r1.status}`,
+                    };
+                    results.push(result);
+                    onProgress?.(result, idx, probes.length);
+                    continue;
+                }
+                let raw = null;
+                try {
+                    raw = JSON.parse(initialBodyText);
+                }
+                catch {
+                    raw = null;
+                }
+                const thinkingBlock = (0, signature_probe_js_1.extractThinkingBlock)(raw) ??
+                    (raw && typeof raw === "object" && "choices" in raw ? (0, signature_probe_js_1.extractThinkingBlock)(raw.choices?.[0]?.message) : null);
+                if (!thinkingBlock) {
+                    const dur = Date.now() - t0;
+                    result = {
+                        probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                        status: "done", passed: false,
+                        passReason: "No thinking block with signature returned by upstream",
+                        ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+                        response: raw && typeof raw === "object"
+                            ? (0, redaction_js_1.redactSecrets)(JSON.stringify(raw), targetSecrets).slice(0, 1000)
+                            : null,
+                        error: null,
+                    };
+                    results.push(result);
+                    onProgress?.(result, idx, probes.length);
+                    continue;
+                }
+                let assistantText = "";
+                if (raw && typeof raw === "object") {
+                    const content = raw.content ?? raw?.choices?.[0]?.message?.content;
+                    if (Array.isArray(content)) {
+                        for (const b of content) {
+                            if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string") {
+                                assistantText += b.text;
+                            }
+                        }
+                    }
+                    else if (typeof content === "string") {
+                        assistantText = content;
+                    }
+                }
+                if (!assistantText)
+                    assistantText = "Understood.";
+                const verifyRes = await (0, signature_probe_js_1.verifySignatureRoundtrip)({
+                    endpoint: messagesUrl,
+                    apiKey,
+                    model: modelId,
+                    originalUserPrompt: probe.prompt,
+                    thinkingBlock,
+                    assistantText,
+                    followUpUserPrompt: "Confirm.",
+                    authHeader,
+                    fetchImpl,
+                    signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
+                    customHeaders,
+                });
+                const dur = Date.now() - t0;
+                if (verifyRes.verified) {
+                    result = {
+                        probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                        status: "done", passed: true,
+                        passReason: "Thinking signature successfully verified by upstream roundtrip",
+                        ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+                        response: "verified=true",
+                        error: null,
+                    };
+                }
+                else {
+                    const failReason = verifyRes.reason === "signature_rejected"
+                        ? `Signature rejected by upstream (HTTP 400): ${verifyRes.rawErrorSnippet?.slice(0, 200) || "invalid signature"}`
+                        : verifyRes.reason === "http_error"
+                            ? `Upstream verification failed with HTTP ${verifyRes.httpStatus}: ${verifyRes.rawErrorSnippet?.slice(0, 200) || "error"}`
+                            : `Network error during verification: ${verifyRes.rawErrorSnippet?.slice(0, 200) || "error"}`;
+                    result = {
+                        probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                        status: "done", passed: false,
+                        passReason: failReason,
+                        ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+                        response: null,
+                        error: verifyRes.rawErrorSnippet?.slice(0, 300) ?? failReason,
+                    };
+                }
+            }
+            catch (e) {
+                if (outerSignal?.aborted) {
+                    throw new Error(`Probe run aborted: ${outerSignal.reason || "aborted"}`);
+                }
+                const dur = Date.now() - t0;
+                result = {
+                    probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                    status: "error", passed: null, passReason: null, ttftMs: null, durationMs: dur,
+                    inputTokens: null, outputTokens: null, tps: null, response: null,
+                    error: (0, redaction_js_1.boundError)(e, 300, targetSecrets),
+                };
             }
             results.push(result);
             onProgress?.(result, idx, probes.length);
@@ -429,9 +596,11 @@ async function runProbes(options) {
             let responseHeaders = {};
             let inputTokens = null;
             let outputTokens = null;
+            const stdHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
+            (0, custom_headers_js_1.mergeCustomHeaders)(stdHeaders, customHeaders);
             const res = await fetchImpl(chatUrl, {
                 method: "POST",
-                headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+                headers: stdHeaders,
                 body: JSON.stringify({
                     model: modelId,
                     messages,
@@ -443,7 +612,8 @@ async function runProbes(options) {
                 signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
             });
             if (!res.ok) {
-                const errText = await res.text();
+                // 64 KiB bound on the error body so a hostile upstream can't flood memory.
+                const errText = await (0, signature_probe_js_1.readBoundedResponse)(res, 64 * 1024).catch(() => "");
                 result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                     status: "error", passed: null, passReason: null, ttftMs: null, durationMs: Date.now() - startTime,
                     inputTokens: null, outputTokens: null, tps: null, response: null, error: `HTTP ${res.status}: ${errText.slice(0, 200)}` };
@@ -457,6 +627,7 @@ async function runProbes(options) {
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
                 let buf = "";
+                let streamBytes = 0;
                 while (true) {
                     if (outerSignal?.aborted) {
                         await reader.cancel().catch(() => { });
@@ -467,6 +638,11 @@ async function runProbes(options) {
                         break;
                     if (ttftMs === null)
                         ttftMs = Date.now() - startTime;
+                    streamBytes += value.byteLength;
+                    if (streamBytes > MAX_STREAM_RESPONSE_BYTES) {
+                        await reader.cancel("Response stream too large").catch(() => { });
+                        throw new Error(`Probe response stream too large (max ${MAX_STREAM_RESPONSE_BYTES} bytes)`);
+                    }
                     buf += decoder.decode(value, { stream: true });
                     const lines = buf.split("\n");
                     buf = lines.pop() ?? "";
@@ -491,7 +667,7 @@ async function runProbes(options) {
                 }
             }
             else {
-                const data = await res.json();
+                const data = await readBoundedJson(res);
                 fullText = data.choices?.[0]?.message?.content ?? "";
                 inputTokens = data.usage?.prompt_tokens ?? null;
                 outputTokens = data.usage?.completion_tokens ?? null;
@@ -541,7 +717,7 @@ async function runProbes(options) {
             else if (probe.scoring === "llm_judge") {
                 // Use judge endpoint + baseline for similarity scoring
                 if (judge && baseline && baseline[probe.id]) {
-                    const judged = await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, baseline[probe.id], judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl);
+                    const judged = await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, fullText, baseline[probe.id], judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders);
                     passed = judged.passed === null ? null : judged.passed ? true : false;
                     passReason = judged.reason;
                 }

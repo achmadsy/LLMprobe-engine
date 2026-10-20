@@ -6,6 +6,29 @@
 // A middleman that synthesises thinking blocks cannot produce a signature that
 // the official verifier accepts.
 
+import { customHeaderSecrets, mergeCustomHeaders } from "./custom-headers.js";
+import { boundError, redactSecrets } from "./redaction.js";
+
+export const MAX_SIGNATURE_RESPONSE_BYTES = 128 * 1024;
+const THINKING_BUDGET_TOKENS = 1024;
+const MAX_TOKENS = 1536;
+
+export type ThinkingConfig =
+  | { type: "adaptive" }
+  | { type: "enabled"; budget_tokens: number };
+
+export function getThinkingConfig(model: string): ThinkingConfig {
+  const normalized = model.toLowerCase();
+  const usesAdaptiveThinking =
+    /(?:^|[-_.])fable[-_.]5(?:[-_.]1)?(?:$|[-_.])/.test(normalized) ||
+    /(?:^|[-_.])sonnet[-_.](?:4[-_.]6|5(?:[-_.]5)?)(?:$|[-_.])/.test(normalized) ||
+    /(?:^|[-_.])opus[-_.](?:4[-_.](?:6|7|8)|5(?:[-_.]5)?)(?:$|[-_.])/.test(normalized);
+
+  return usesAdaptiveThinking
+    ? { type: "adaptive" }
+    : { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS };
+}
+
 export interface AnthropicThinkingBlock {
   type: "thinking";
   thinking: string;
@@ -46,6 +69,7 @@ export interface VerifyArgs extends RoundtripBodyArgs {
   authHeader?: "x-api-key" | "authorization";
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
+  customHeaders?: Record<string, string>;
 }
 
 export interface VerifyResult {
@@ -57,17 +81,50 @@ export interface VerifyResult {
 
 export type RoundtripBody = ReturnType<typeof buildRoundtripBody>;
 
+export async function readBoundedResponse(
+  response: Response,
+  maxBytes = MAX_SIGNATURE_RESPONSE_BYTES,
+): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("Response body too large");
+        throw new Error(`Signature response too large (max ${maxBytes} bytes)`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
+
 export function buildRoundtripBody(args: RoundtripBodyArgs): {
   model: string;
   max_tokens: number;
-  thinking: { type: string; budget_tokens: number };
+  thinking: ThinkingConfig;
   messages: Array<{ role: string; content: string | Array<{ type: string; thinking?: string; signature?: string; text?: string }> }>;
 } {
   const { model, originalUserPrompt, thinkingBlock, assistantText, followUpUserPrompt } = args;
   return {
     model,
-    max_tokens: 512,
-    thinking: { type: "enabled", budget_tokens: 1024 },
+    max_tokens: MAX_TOKENS,
+    thinking: getThinkingConfig(model),
     messages: [
       { role: "user", content: originalUserPrompt },
       {
@@ -91,6 +148,11 @@ export async function verifySignatureRoundtrip(args: VerifyArgs): Promise<Verify
   } = args;
 
   const body = buildRoundtripBody(args);
+  const secrets = [
+    apiKey,
+    args.thinkingBlock.signature,
+    ...customHeaderSecrets(args.customHeaders),
+  ];
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -99,6 +161,7 @@ export async function verifySignatureRoundtrip(args: VerifyArgs): Promise<Verify
       ? { "x-api-key": apiKey }
       : { authorization: `Bearer ${apiKey}` }),
   };
+  mergeCustomHeaders(headers, args.customHeaders);
 
   let resp: Response;
   try {
@@ -109,18 +172,36 @@ export async function verifySignatureRoundtrip(args: VerifyArgs): Promise<Verify
       signal: signal ?? AbortSignal.timeout(60_000),
     });
   } catch (e) {
-    return { verified: false, httpStatus: 0, reason: "network_error", rawErrorSnippet: (e as Error).message?.slice(0, 200) ?? null };
+    if (signal?.aborted) throw e;
+    return {
+      verified: false,
+      httpStatus: 0,
+      reason: "network_error",
+      rawErrorSnippet: boundError(e, 200, secrets),
+    };
   }
 
-  const bodyText = await resp.text().catch(() => "");
+  let bodyText = "";
+  try {
+    bodyText = await readBoundedResponse(resp);
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return {
+      verified: false,
+      httpStatus: resp.status,
+      reason: "http_error",
+      rawErrorSnippet: boundError(e, 300, secrets),
+    };
+  }
 
   if (resp.ok) {
     return { verified: true, httpStatus: resp.status, reason: "ok", rawErrorSnippet: null };
   }
 
+  const errorSnippet = redactSecrets(bodyText, secrets).slice(0, 300);
   if (resp.status === 400 && bodyText.toLowerCase().includes("invalid")) {
-    return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: bodyText.slice(0, 300) };
+    return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: errorSnippet };
   }
 
-  return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: bodyText.slice(0, 300) };
+  return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: errorSnippet };
 }

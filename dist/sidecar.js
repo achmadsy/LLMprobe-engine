@@ -41,6 +41,7 @@ const http = __importStar(require("http"));
 const crypto_1 = require("crypto");
 const runner_js_1 = require("./runner.js");
 const egress_guard_js_1 = require("./egress-guard.js");
+const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
 const probe_suite_js_1 = require("./probe-suite.js");
 exports.SIDECAR_VERSION = "0.11.0";
@@ -203,7 +204,21 @@ class SidecarServer {
             res.end(JSON.stringify({ error: { message: "Invalid baseUrl or apiKey", code: "bad_request" } }));
             return;
         }
-        const secrets = [apiKey, this.configuredToken]
+        // User-supplied additional headers: validate before anything else runs
+        let customHeaders;
+        try {
+            const normalized = (0, custom_headers_js_1.normalizeCustomHeaders)(body.customHeaders);
+            if (Object.keys(normalized).length > 0)
+                customHeaders = normalized;
+        }
+        catch (err) {
+            if (!(err instanceof custom_headers_js_1.CustomHeadersError))
+                throw err;
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: err.message, code: "bad_request" } }));
+            return;
+        }
+        const secrets = [apiKey, this.configuredToken, ...(0, custom_headers_js_1.customHeaderSecrets)(body.customHeaders)]
             .filter((secret) => typeof secret === "string" && secret.length > 0);
         try {
             const parsed = (0, egress_guard_js_1.validateUrl)(baseUrl, this.config.egressOptions);
@@ -211,9 +226,11 @@ class SidecarServer {
             parsed.pathname = basePath.endsWith("/models") ? basePath : `${basePath}/models`;
             parsed.search = "";
             parsed.hash = "";
-            const headers = new Headers({ accept: "application/json" });
+            const headerRecord = { "accept": "application/json" };
             if (apiKey)
-                headers.set("authorization", `Bearer ${apiKey}`);
+                headerRecord["authorization"] = `Bearer ${apiKey}`;
+            (0, custom_headers_js_1.mergeCustomHeaders)(headerRecord, customHeaders);
+            const headers = new Headers(headerRecord);
             const safeFetch = (0, egress_guard_js_1.createSafeFetch)(this.config.egressOptions);
             const response = await safeFetch(parsed, {
                 method: "GET",
@@ -319,6 +336,34 @@ class SidecarServer {
             res.end(JSON.stringify({ error: { message: `Egress blocked: ${egressErr.message}`, code: "egress_blocked" } }));
             return;
         }
+        // User-supplied additional headers: validate target and judge sets
+        // independently before the run starts (400 with exact validator message).
+        let targetCustomHeaders;
+        let judgeCustomHeaders;
+        try {
+            const normalizedTarget = (0, custom_headers_js_1.normalizeCustomHeaders)(body.customHeaders);
+            if (Object.keys(normalizedTarget).length > 0)
+                targetCustomHeaders = normalizedTarget;
+        }
+        catch (err) {
+            if (!(err instanceof custom_headers_js_1.CustomHeadersError))
+                throw err;
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: err.message, code: "bad_request" } }));
+            return;
+        }
+        try {
+            const normalizedJudge = (0, custom_headers_js_1.normalizeCustomHeaders)(body.judge?.customHeaders);
+            if (Object.keys(normalizedJudge).length > 0)
+                judgeCustomHeaders = normalizedJudge;
+        }
+        catch (err) {
+            if (!(err instanceof custom_headers_js_1.CustomHeadersError))
+                throw err;
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: err.message, code: "bad_request" } }));
+            return;
+        }
         const runId = body.id || body.runId || (0, crypto_1.randomUUID)();
         const abortController = new AbortController();
         this.activeRun = {
@@ -327,13 +372,15 @@ class SidecarServer {
             startedAt: new Date().toISOString(),
             abortController,
         };
-        // Gather secrets for redaction
+        // Gather secrets for redaction (including custom header values)
         const secrets = [
             body.apiKey,
             body.judge?.apiKey,
             body.identityJudge?.apiKey,
             body.embeddingEndpoint?.apiKey,
             this.configuredToken,
+            ...(0, custom_headers_js_1.customHeaderSecrets)(body.customHeaders),
+            ...(0, custom_headers_js_1.customHeaderSecrets)(body.judge?.customHeaders),
         ].filter((s) => typeof s === "string" && s.length > 0);
         // Setup SSE response
         res.writeHead(200, {
@@ -360,6 +407,10 @@ class SidecarServer {
         try {
             const report = await (0, runner_js_1.runProbes)({
                 ...body,
+                // Pass validated maps explicitly: the raw body spread may carry
+                // unvalidated row arrays that the runner would not honor.
+                customHeaders: targetCustomHeaders,
+                judge: body.judge ? { ...body.judge, customHeaders: judgeCustomHeaders } : undefined,
                 signal: abortController.signal,
                 egressOptions: egressOpts,
                 onProgress: (result, index, total) => {

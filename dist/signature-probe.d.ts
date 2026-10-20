@@ -1,3 +1,11 @@
+export declare const MAX_SIGNATURE_RESPONSE_BYTES: number;
+export type ThinkingConfig = {
+    type: "adaptive";
+} | {
+    type: "enabled";
+    budget_tokens: number;
+};
+export declare function getThinkingConfig(model: string): ThinkingConfig;
 export interface AnthropicThinkingBlock {
     type: "thinking";
     thinking: string;
@@ -18,6 +26,7 @@ export interface VerifyArgs extends RoundtripBodyArgs {
     authHeader?: "x-api-key" | "authorization";
     fetchImpl?: typeof fetch;
     signal?: AbortSignal;
+    customHeaders?: Record<string, string>;
 }
 export interface VerifyResult {
     verified: boolean;
@@ -26,13 +35,11 @@ export interface VerifyResult {
     rawErrorSnippet: string | null;
 }
 export type RoundtripBody = ReturnType<typeof buildRoundtripBody>;
+export declare function readBoundedResponse(response: Response, maxBytes?: number): Promise<string>;
 export declare function buildRoundtripBody(args: RoundtripBodyArgs): {
     model: string;
     max_tokens: number;
-    thinking: {
-        type: string;
-        budget_tokens: number;
-    };
+    thinking: ThinkingConfig;
     messages: Array<{
         role: string;
         content: string | Array<{

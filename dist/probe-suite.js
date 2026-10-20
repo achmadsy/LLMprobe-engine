@@ -1180,6 +1180,16 @@ exports.PROBE_SUITE = [
         neutral: true,
         maxTokens: 120,
     },
+    {
+        id: "ac5_signature_verify",
+        label: "Anthropic 思考簽章驗證",
+        group: "signature",
+        scoring: "signature_verify",
+        acCategory: "AC-5",
+        description: "透過 Anthropic extended-thinking 簽章回放驗證上游真偽 (AC-5: thinking signature verification)。",
+        prompt: "Think step by step: what is 17 × 23?",
+        maxTokens: 1024,
+    },
 ];
 /** Prompts compatible with the existing model-evaluator (all except cache_detection and identity probes) */
 exports.EVAL_PROMPTS = exports.PROBE_SUITE
@@ -1359,6 +1369,9 @@ function autoScore(probe, responseText, responseHeaders, lang, opts) {
         case "thinking_check":
         case "consistency_check":
         case "context_check":
+        case "channel_signature":
+        case "signature_verify":
+        case "feature_extract":
         case "llm_judge":
         case "human_review":
             return null;

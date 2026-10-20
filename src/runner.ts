@@ -10,13 +10,14 @@ import { runContextCheck } from "./context-check.js";
 import { extractFingerprint } from "./fingerprint-extractor.js";
 import { matchCandidates, deriveVerdictFromClaimedModel } from "./candidate-matcher.js";
 import { classifyChannelSignature } from "./channel-signature.js";
-import { extractThinkingBlock, verifySignatureRoundtrip } from "./signature-probe.js";
+import { extractThinkingBlock, getThinkingConfig, MAX_SIGNATURE_RESPONSE_BYTES, readBoundedResponse, verifySignatureRoundtrip } from "./signature-probe.js";
 import { judgeFingerprint } from "./fingerprint-judge.js";
 import { embedProbeResponses, pickTopVectorScores, type ReferenceEmbedding } from "./fingerprint-vectors.js";
 import { fuseScores } from "./fingerprint-fusion.js";
 import type { IdentityAssessment } from "./identity-report.js";
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions } from "./egress-guard.js";
-import { mergeCustomHeaders } from "./custom-headers.js";
+import { customHeaderSecrets, mergeCustomHeaders } from "./custom-headers.js";
+import { boundError, redactSecrets } from "./redaction.js";
 
 export interface ProbeResult {
   probeId: string;
@@ -54,6 +55,17 @@ export interface RunReport {
  * Obtained from `collect-baseline` or downloaded from the BazaarLink public API.
  */
 export type BaselineMap = Record<string, string>;
+
+/** Cap for reading the non-OK preflight response body before classification. */
+const MAX_PREFLIGHT_RESPONSE_BYTES = 64 * 1024;
+
+/** Cap for total bytes accumulated from a streaming (SSE) probe response. */
+const MAX_STREAM_RESPONSE_BYTES = 1024 * 1024;
+
+/** Bounded body read + parse so a hostile upstream can't buffer unlimited bytes. */
+async function readBoundedJson<T>(res: Response, maxBytes = MAX_SIGNATURE_RESPONSE_BYTES): Promise<T> {
+  return JSON.parse(await readBoundedResponse(res, maxBytes)) as T;
+}
 
 export interface RunOptions {
   baseUrl: string;
@@ -190,7 +202,7 @@ Respond ONLY with valid JSON: {"score": <number 1-10>, "reason": "<one sentence>
       signal: combineSignals(timeoutMs, signal),
     });
     if (!res.ok) return { passed: null, reason: `Judge API error: HTTP ${res.status}` };
-    const data = await res.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const data = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }> }>(res);
     const text = data.choices?.[0]?.message?.content ?? "";
     const scored = parseJudgeScore(text);
     if (!scored) return { passed: null, reason: `Judge returned unparseable response: ${text.slice(0, 100)}` };
@@ -229,6 +241,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
 
   const fetchImpl = options.fetchFn ?? (options.egressOptions ? createSafeFetch(options.egressOptions) : fetch);
   const outerSignal = options.signal;
+  const targetSecrets = [apiKey, ...customHeaderSecrets(customHeaders)];
 
   const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
   const startedAt = new Date().toISOString();
@@ -248,7 +261,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       signal: combineSignals(45_000, outerSignal),
     });
     if (!pfRes.ok) {
-      const rawBody = await pfRes.text().catch(() => "");
+      const rawBody = await readBoundedResponse(pfRes, MAX_PREFLIGHT_RESPONSE_BYTES).catch(() => "");
       const { outcome, reason } = classifyPreflightResult(pfRes.status, rawBody);
       if (outcome === "abort") {
         for (const probe of probes) {
@@ -284,7 +297,8 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           signal: combineSignals(timeoutMs, outerSignal),
         });
         const dur = Date.now() - t0;
-        const bodyText = await r.text();
+        // 128 KiB bound keeps a hostile upstream from exhausting runner memory.
+        const bodyText = await readBoundedResponse(r, MAX_SIGNATURE_RESPONSE_BYTES).catch(() => r.text().then((t) => t.slice(0, MAX_SIGNATURE_RESPONSE_BYTES)));
         const responseHeaders: Record<string, string> = {};
         r.headers.forEach((val, key) => { responseHeaders[key.toLowerCase()] = val; });
         let messageId: string | null = null;
@@ -328,7 +342,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
             signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) return null;
-          const d = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+          const d = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }> }>(r);
           return (d.choices?.[0]?.message?.content ?? "").trim();
         } catch { return null; }
       };
@@ -435,7 +449,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
             signal: combineSignals(timeoutMs, outerSignal),
           });
           if (!r.ok) { responses.push("__ERROR__"); continue; }
-          const d = await r.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+          const d = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } }>(r);
           responses.push((d.choices?.[0]?.message?.content ?? "").trim());
           if (i === 0) { inTok = d.usage?.prompt_tokens ?? null; outTok = d.usage?.completion_tokens ?? null; }
         } catch { responses.push("__EXCEPTION__"); }
@@ -465,7 +479,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: message }], max_tokens: 256, stream: false }),
           signal: combineSignals(timeoutMs, outerSignal),
         });
-        const j = await r.json() as { choices?: Array<{ message?: { content?: string } }> };
+        const j = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }> }>(r);
         return j.choices?.[0]?.message?.content ?? "";
       };
       try {
@@ -476,6 +490,152 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       } catch (e) {
         result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
           status: "error", passed: null, passReason: null, ttftMs: null, durationMs: null, inputTokens: null, outputTokens: null, tps: null, response: null, error: (e as Error).message?.slice(0, 300) ?? "Unknown error" };
+      }
+      results.push(result);
+      onProgress?.(result, idx, probes.length);
+      continue;
+    }
+
+    // ── signature_verify (AC-5) ──────────────────────────────────────────
+    if (probe.scoring === "signature_verify") {
+      const t0 = Date.now();
+      try {
+        const messagesUrl = baseUrl.endsWith("/messages")
+          ? baseUrl
+          : `${baseUrl.replace(/\/chat\/completions\/?$/, "").replace(/\/$/, "")}/messages`;
+        if (options.egressOptions) validateUrl(messagesUrl, options.egressOptions);
+        const authHeader: "x-api-key" | "authorization" = apiKey.startsWith("sk-ant-")
+          ? "x-api-key"
+          : "authorization";
+
+        const initHeaders: Record<string, string> = {
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+          ...(authHeader === "x-api-key"
+            ? { "x-api-key": apiKey }
+            : { authorization: `Bearer ${apiKey}` }),
+        };
+        mergeCustomHeaders(initHeaders, customHeaders);
+
+        const r1 = await fetchImpl(messagesUrl, {
+          method: "POST",
+          headers: initHeaders,
+          body: JSON.stringify({
+            model: modelId,
+            max_tokens: Math.max(probe.maxTokens ?? 1536, 1536),
+            thinking: getThinkingConfig(modelId),
+            messages: [{ role: "user", content: probe.prompt }],
+          }),
+          signal: combineSignals(timeoutMs, outerSignal),
+        });
+
+        const initialBodyText = await readBoundedResponse(r1);
+        if (!r1.ok) {
+          const errBody = redactSecrets(initialBodyText, targetSecrets);
+          const dur = Date.now() - t0;
+          result = {
+            probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+            status: "done", passed: false,
+            passReason: `Initial request failed (HTTP ${r1.status}): ${errBody.slice(0, 200) || "error"}`,
+            ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+            response: null, error: errBody.slice(0, 300) || `HTTP ${r1.status}`,
+          };
+          results.push(result);
+          onProgress?.(result, idx, probes.length);
+          continue;
+        }
+
+        let raw: unknown = null;
+        try {
+          raw = JSON.parse(initialBodyText);
+        } catch {
+          raw = null;
+        }
+        const thinkingBlock = extractThinkingBlock(raw) ??
+          (raw && typeof raw === "object" && "choices" in raw ? extractThinkingBlock((raw as any).choices?.[0]?.message) : null);
+
+        if (!thinkingBlock) {
+          const dur = Date.now() - t0;
+          result = {
+            probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+            status: "done", passed: false,
+            passReason: "No thinking block with signature returned by upstream",
+            ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+            response: raw && typeof raw === "object"
+              ? redactSecrets(JSON.stringify(raw), targetSecrets).slice(0, 1000)
+              : null,
+            error: null,
+          };
+          results.push(result);
+          onProgress?.(result, idx, probes.length);
+          continue;
+        }
+
+        let assistantText = "";
+        if (raw && typeof raw === "object") {
+          const content = (raw as { content?: unknown }).content ?? (raw as any)?.choices?.[0]?.message?.content;
+          if (Array.isArray(content)) {
+            for (const b of content) {
+              if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string") {
+                assistantText += b.text;
+              }
+            }
+          } else if (typeof content === "string") {
+            assistantText = content;
+          }
+        }
+        if (!assistantText) assistantText = "Understood.";
+
+        const verifyRes = await verifySignatureRoundtrip({
+          endpoint: messagesUrl,
+          apiKey,
+          model: modelId,
+          originalUserPrompt: probe.prompt,
+          thinkingBlock,
+          assistantText,
+          followUpUserPrompt: "Confirm.",
+          authHeader,
+          fetchImpl,
+          signal: combineSignals(timeoutMs, outerSignal),
+          customHeaders,
+        });
+
+        const dur = Date.now() - t0;
+        if (verifyRes.verified) {
+          result = {
+            probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+            status: "done", passed: true,
+            passReason: "Thinking signature successfully verified by upstream roundtrip",
+            ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+            response: "verified=true",
+            error: null,
+          };
+        } else {
+          const failReason = verifyRes.reason === "signature_rejected"
+            ? `Signature rejected by upstream (HTTP 400): ${verifyRes.rawErrorSnippet?.slice(0, 200) || "invalid signature"}`
+            : verifyRes.reason === "http_error"
+              ? `Upstream verification failed with HTTP ${verifyRes.httpStatus}: ${verifyRes.rawErrorSnippet?.slice(0, 200) || "error"}`
+              : `Network error during verification: ${verifyRes.rawErrorSnippet?.slice(0, 200) || "error"}`;
+          result = {
+            probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+            status: "done", passed: false,
+            passReason: failReason,
+            ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
+            response: null,
+            error: verifyRes.rawErrorSnippet?.slice(0, 300) ?? failReason,
+          };
+        }
+      } catch (e) {
+        if (outerSignal?.aborted) {
+          throw new Error(`Probe run aborted: ${outerSignal.reason || "aborted"}`);
+        }
+        const dur = Date.now() - t0;
+        result = {
+          probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+          status: "error", passed: null, passReason: null, ttftMs: null, durationMs: dur,
+          inputTokens: null, outputTokens: null, tps: null, response: null,
+          error: boundError(e, 300, targetSecrets),
+        };
       }
       results.push(result);
       onProgress?.(result, idx, probes.length);
@@ -552,7 +712,8 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       });
 
       if (!res.ok) {
-        const errText = await res.text();
+        // 64 KiB bound on the error body so a hostile upstream can't flood memory.
+        const errText = await readBoundedResponse(res, 64 * 1024).catch(() => "");
         result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
           status: "error", passed: null, passReason: null, ttftMs: null, durationMs: Date.now() - startTime,
           inputTokens: null, outputTokens: null, tps: null, response: null, error: `HTTP ${res.status}: ${errText.slice(0, 200)}` };
@@ -568,6 +729,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
+        let streamBytes = 0;
         while (true) {
           if (outerSignal?.aborted) {
             await reader.cancel().catch(() => {});
@@ -576,6 +738,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           const { done, value } = await reader.read();
           if (done) break;
           if (ttftMs === null) ttftMs = Date.now() - startTime;
+          streamBytes += value.byteLength;
+          if (streamBytes > MAX_STREAM_RESPONSE_BYTES) {
+            await reader.cancel("Response stream too large").catch(() => {});
+            throw new Error(`Probe response stream too large (max ${MAX_STREAM_RESPONSE_BYTES} bytes)`);
+          }
           buf += decoder.decode(value, { stream: true });
           const lines = buf.split("\n"); buf = lines.pop() ?? "";
           for (const line of lines) {
@@ -591,7 +758,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           }
         }
       } else {
-        const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+        const data = await readBoundedJson<{ choices?: Array<{ message?: { content?: string } }>; usage?: { prompt_tokens?: number; completion_tokens?: number } }>(res);
         fullText = data.choices?.[0]?.message?.content ?? "";
         inputTokens = data.usage?.prompt_tokens ?? null;
         outputTokens = data.usage?.completion_tokens ?? null;

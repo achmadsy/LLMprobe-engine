@@ -45,6 +45,8 @@ export interface RunOptions {
     timeoutMs?: number;
     /** Called after each probe completes */
     onProgress?: (result: ProbeResult, index: number, total: number) => void;
+    /** Extra headers merged into every target-phase request (never overrides Authorization/Content-Type/probe extras). */
+    customHeaders?: Record<string, string>;
     /** Judge endpoint for llm_judge probes (optional; skipped if absent) */
     judge?: {
         baseUrl: string;
@@ -52,6 +54,8 @@ export interface RunOptions {
         modelId: string;
         /** Score threshold 1-10. Default: 7 */
         threshold?: number;
+        /** Extra headers sent only on judge requests. */
+        customHeaders?: Record<string, string>;
     };
     /**
      * Baseline responses to compare against during llm_judge scoring.

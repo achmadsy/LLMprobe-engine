@@ -6,6 +6,7 @@ import { randomUUID } from "crypto";
 import { runProbes, type RunOptions, type RunReport, type ProbeResult } from "./runner.js";
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions, EgressError } from "./egress-guard.js";
 import { redactSecrets, truncateString, boundError, sanitizeProbeResult, sanitizeReport } from "./redaction.js";
+import { PROBE_SUITE } from "./probe-suite.js";
 
 export interface SidecarConfig {
   port?: number;
@@ -161,6 +162,23 @@ export class SidecarServer {
       offset += chunk.byteLength;
     }
     return new TextDecoder().decode(body);
+  }
+
+  private handleProbes(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!this.authenticate(req, res)) return;
+
+    const probes = PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral }) => ({
+      id,
+      label,
+      group,
+      description,
+      ...(optional ? { optional: true } : {}),
+      ...(isNew ? { isNew: true } : {}),
+      ...(neutral ? { neutral: true } : {}),
+    }));
+
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ version: SIDECAR_VERSION, probes }));
   }
 
   private async handleModels(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -406,6 +424,11 @@ export class SidecarServer {
 
     if (req.method === "GET" && (path === "/health" || path === "/_probe_health")) {
       this.handleHealth(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && path === "/v1/probes") {
+      this.handleProbes(req, res);
       return;
     }
 

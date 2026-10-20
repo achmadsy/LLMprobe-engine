@@ -134,6 +134,11 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
       expect(json.source).toBe(SIDECAR_SOURCE);
     });
 
+    it("rejects GET /v1/probes with 401 when unauthenticated", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`);
+      expect(res.status).toBe(401);
+    });
+
     it("rejects POST /v1/models with 401 when unauthenticated", async () => {
       const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/models`, {
         method: "POST",
@@ -157,6 +162,30 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
         method: "POST",
       });
       expect(res.status).toBe(401);
+    });
+  });
+
+  describe("Probe Catalog", () => {
+    it("returns the authoritative probe suite without prompts or scoring rules", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`, {
+        headers: { Authorization: `Bearer ${TEST_TOKEN}` },
+      });
+
+      expect(res.status).toBe(200);
+      const json = await res.json() as {
+        version: string;
+        probes: Array<Record<string, unknown>>;
+      };
+      expect(json.version).toBe(SIDECAR_VERSION);
+      expect(json.probes.length).toBeGreaterThan(0);
+      expect(json.probes[0]).toEqual(expect.objectContaining({
+        id: expect.any(String),
+        label: expect.any(String),
+        group: expect.any(String),
+        description: expect.any(String),
+      }));
+      expect(json.probes[0]).not.toHaveProperty("prompt");
+      expect(json.probes[0]).not.toHaveProperty("scoring");
     });
   });
 

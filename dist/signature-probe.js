@@ -15,6 +15,7 @@ exports.buildRoundtripBody = buildRoundtripBody;
 exports.verifySignatureRoundtrip = verifySignatureRoundtrip;
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
+const retry_fetch_js_1 = require("./retry-fetch.js");
 exports.MAX_SIGNATURE_RESPONSE_BYTES = 128 * 1024;
 const THINKING_BUDGET_TOKENS = 1024;
 const MAX_TOKENS = 1536;
@@ -146,12 +147,12 @@ async function verifySignatureRoundtrip(args) {
         };
     }
     if (resp.ok) {
-        return { verified: true, httpStatus: resp.status, reason: "ok", rawErrorSnippet: null };
+        return { verified: true, httpStatus: resp.status, reason: "ok", rawErrorSnippet: null, retries: (0, retry_fetch_js_1.retryCountOf)(resp) };
     }
     const errorSnippet = (0, redaction_js_1.redactSecrets)(bodyText, secrets).slice(0, 300);
     if (resp.status === 400 && bodyText.toLowerCase().includes("invalid")) {
-        return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: errorSnippet };
+        return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: errorSnippet, retries: (0, retry_fetch_js_1.retryCountOf)(resp) };
     }
-    return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: errorSnippet };
+    return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: errorSnippet, retries: (0, retry_fetch_js_1.retryCountOf)(resp) };
 }
 //# sourceMappingURL=signature-probe.js.map

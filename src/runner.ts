@@ -16,6 +16,7 @@ import { embedProbeResponses, pickTopVectorScores, type ReferenceEmbedding } fro
 import { fuseScores } from "./fingerprint-fusion.js";
 import type { IdentityAssessment } from "./identity-report.js";
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions } from "./egress-guard.js";
+import { createRetryingFetch, retryCountOf } from "./retry-fetch.js";
 import { customHeaderSecrets, mergeCustomHeaders } from "./custom-headers.js";
 import { boundError, redactSecrets } from "./redaction.js";
 
@@ -73,6 +74,11 @@ export interface RunOptions {
   modelId: string;
   /** Include optional probes (e.g. context_length). Default: false */
   includeOptional?: boolean;
+  /**
+   * Transport-level retries per request (network errors, 5xx, 429).
+   * Semantic failures are never retried. Default: 2. Use 0 to disable.
+   */
+  requestRetries?: number;
   /** Timeout per probe request in ms. Default: 180_000 */
   timeoutMs?: number;
   /** Called after each probe completes */
@@ -239,7 +245,10 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     if (options.embeddingEndpoint?.baseUrl) validateUrl(options.embeddingEndpoint.baseUrl, options.egressOptions);
   }
 
-  const fetchImpl = options.fetchFn ?? (options.egressOptions ? createSafeFetch(options.egressOptions) : fetch);
+  const fetchImpl = createRetryingFetch(
+    options.fetchFn ?? (options.egressOptions ? createSafeFetch(options.egressOptions) : fetch),
+    { retries: options.requestRetries ?? 2, signal: options.signal },
+  );
   const outerSignal = options.signal;
   const targetSecrets = [apiKey, ...customHeaderSecrets(customHeaders)];
 
@@ -602,10 +611,12 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
 
         const dur = Date.now() - t0;
         if (verifyRes.verified) {
+          const retries = Math.max(retryCountOf(r1), verifyRes.retries ?? 0);
           result = {
             probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
             status: "done", passed: true,
-            passReason: "Thinking signature successfully verified by upstream roundtrip",
+            passReason: "Thinking signature successfully verified by upstream roundtrip"
+              + (retries > 0 ? ` (after ${retries} transport ${retries === 1 ? "retry" : "retries"})` : ""),
             ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
             response: "verified=true",
             error: null,
@@ -828,6 +839,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           passed = null;
           passReason = `llm_judge: no baseline entry for probe '${probe.id}' — run collect-baseline to build one`;
         }
+      }
+
+      const transportRetries = retryCountOf(res);
+      if (transportRetries > 0 && passReason) {
+        passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
       }
 
       result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,

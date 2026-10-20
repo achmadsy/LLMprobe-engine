@@ -41,6 +41,11 @@ export interface RunOptions {
     modelId: string;
     /** Include optional probes (e.g. context_length). Default: false */
     includeOptional?: boolean;
+    /**
+     * Transport-level retries per request (network errors, 5xx, 429).
+     * Semantic failures are never retried. Default: 2. Use 0 to disable.
+     */
+    requestRetries?: number;
     /** Timeout per probe request in ms. Default: 180_000 */
     timeoutMs?: number;
     /** Called after each probe completes */

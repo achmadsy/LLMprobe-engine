@@ -33,6 +33,8 @@ export interface VerifyResult {
     httpStatus: number;
     reason: "ok" | "signature_rejected" | "http_error" | "network_error";
     rawErrorSnippet: string | null;
+    /** Transport retries the (wrapped) fetch used before this response. */
+    retries?: number;
 }
 export type RoundtripBody = ReturnType<typeof buildRoundtripBody>;
 export declare function readBoundedResponse(response: Response, maxBytes?: number): Promise<string>;

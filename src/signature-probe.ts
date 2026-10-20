@@ -8,6 +8,7 @@
 
 import { customHeaderSecrets, mergeCustomHeaders } from "./custom-headers.js";
 import { boundError, redactSecrets } from "./redaction.js";
+import { retryCountOf } from "./retry-fetch.js";
 
 export const MAX_SIGNATURE_RESPONSE_BYTES = 128 * 1024;
 const THINKING_BUDGET_TOKENS = 1024;
@@ -77,6 +78,8 @@ export interface VerifyResult {
   httpStatus: number;
   reason: "ok" | "signature_rejected" | "http_error" | "network_error";
   rawErrorSnippet: string | null;
+  /** Transport retries the (wrapped) fetch used before this response. */
+  retries?: number;
 }
 
 export type RoundtripBody = ReturnType<typeof buildRoundtripBody>;
@@ -195,13 +198,13 @@ export async function verifySignatureRoundtrip(args: VerifyArgs): Promise<Verify
   }
 
   if (resp.ok) {
-    return { verified: true, httpStatus: resp.status, reason: "ok", rawErrorSnippet: null };
+    return { verified: true, httpStatus: resp.status, reason: "ok", rawErrorSnippet: null, retries: retryCountOf(resp) };
   }
 
   const errorSnippet = redactSecrets(bodyText, secrets).slice(0, 300);
   if (resp.status === 400 && bodyText.toLowerCase().includes("invalid")) {
-    return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: errorSnippet };
+    return { verified: false, httpStatus: 400, reason: "signature_rejected", rawErrorSnippet: errorSnippet, retries: retryCountOf(resp) };
   }
 
-  return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: errorSnippet };
+  return { verified: false, httpStatus: resp.status, reason: "http_error", rawErrorSnippet: errorSnippet, retries: retryCountOf(resp) };
 }

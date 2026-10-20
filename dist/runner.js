@@ -17,6 +17,7 @@ const fingerprint_judge_js_1 = require("./fingerprint-judge.js");
 const fingerprint_vectors_js_1 = require("./fingerprint-vectors.js");
 const fingerprint_fusion_js_1 = require("./fingerprint-fusion.js");
 const egress_guard_js_1 = require("./egress-guard.js");
+const retry_fetch_js_1 = require("./retry-fetch.js");
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
 /** Cap for reading the non-OK preflight response body before classification. */
@@ -118,7 +119,7 @@ async function runProbes(options) {
         if (options.embeddingEndpoint?.baseUrl)
             (0, egress_guard_js_1.validateUrl)(options.embeddingEndpoint.baseUrl, options.egressOptions);
     }
-    const fetchImpl = options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch);
+    const fetchImpl = (0, retry_fetch_js_1.createRetryingFetch)(options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch), { retries: options.requestRetries ?? 2, signal: options.signal });
     const outerSignal = options.signal;
     const targetSecrets = [apiKey, ...(0, custom_headers_js_1.customHeaderSecrets)(customHeaders)];
     const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
@@ -508,10 +509,12 @@ async function runProbes(options) {
                 });
                 const dur = Date.now() - t0;
                 if (verifyRes.verified) {
+                    const retries = Math.max((0, retry_fetch_js_1.retryCountOf)(r1), verifyRes.retries ?? 0);
                     result = {
                         probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                         status: "done", passed: true,
-                        passReason: "Thinking signature successfully verified by upstream roundtrip",
+                        passReason: "Thinking signature successfully verified by upstream roundtrip"
+                            + (retries > 0 ? ` (after ${retries} transport ${retries === 1 ? "retry" : "retries"})` : ""),
                         ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
                         response: "verified=true",
                         error: null,
@@ -733,6 +736,10 @@ async function runProbes(options) {
                     passed = null;
                     passReason = `llm_judge: no baseline entry for probe '${probe.id}' — run collect-baseline to build one`;
                 }
+            }
+            const transportRetries = (0, retry_fetch_js_1.retryCountOf)(res);
+            if (transportRetries > 0 && passReason) {
+                passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
             }
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                 status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,

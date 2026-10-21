@@ -1,4 +1,12 @@
 import type { FingerprintFeatureSet, IdentityCandidate, IdentityStatus } from "./identity-report.js";
+import type { ConfidenceBand, VerdictStatus } from "./identity-verdict.js";
+/** Original-page verdict object: family-level resolution with explicit status. */
+export interface FamilyVerdict {
+    status: VerdictStatus;
+    trueFamily: string | null;
+    reasoning: string[];
+    confidence: ConfidenceBand;
+}
 /**
  * Score each family baseline against the observed feature set.
  * Returns top-3 candidates sorted by score descending, normalized to 0-1.
@@ -22,4 +30,11 @@ export declare function deriveVerdictFromClaimedModel(candidates: IdentityCandid
     evidence: string[];
     predictedFamily: string | undefined;
 };
+/**
+ * Original-page verdict: even when the exact sub-model can't be confirmed, a
+ * claimed family that appears among the candidates resolves to
+ * "clean_match_family_only" instead of a flat mismatch. This matches the
+ * official-page behavior for e.g. brand-new GLM Flash releases.
+ */
+export declare function deriveFamilyVerdict(candidates: IdentityCandidate[], claimedFamily: string | undefined): FamilyVerdict;
 //# sourceMappingURL=candidate-matcher.d.ts.map

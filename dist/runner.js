@@ -11,6 +11,7 @@ const sse_compliance_js_1 = require("./sse-compliance.js");
 const context_check_js_1 = require("./context-check.js");
 const fingerprint_extractor_js_1 = require("./fingerprint-extractor.js");
 const candidate_matcher_js_1 = require("./candidate-matcher.js");
+const fingerprint_baseline_js_1 = require("./fingerprint-baseline.js");
 const channel_signature_js_1 = require("./channel-signature.js");
 const signature_probe_js_1 = require("./signature-probe.js");
 const fingerprint_judge_js_1 = require("./fingerprint-judge.js");
@@ -667,8 +668,10 @@ async function runProbes(options) {
             }
             messages.push({ role: "user", content: userContent });
             // ── max_tokens: per-probe override → scoring fallback ───────────────
+            // Reasoning models burn hidden CoT tokens before the visible answer, so
+            // the exact-answer budget must leave headroom or they return "".
             const isExact = probe.scoring === "exact_match" || probe.scoring === "exact_response";
-            const maxTokens = probe.maxTokens ?? (isExact ? 64 : 1024);
+            const maxTokens = probe.maxTokens ?? (isExact ? 768 : 1024);
             const useStream = probe.scoring !== "header_check";
             const rawSseLines = [];
             let fullText = "";
@@ -888,6 +891,9 @@ async function runProbes(options) {
             // fuseScores returns IdentityCandidate[] directly
             const candidates = (0, fingerprint_fusion_js_1.fuseScores)(ruleScores, judgeScores, vectorScores);
             const { status, confidence, evidence, predictedFamily } = (0, candidate_matcher_js_1.deriveVerdictFromClaimedModel)(candidates, options.claimedModel);
+            const claimedFamily = options.claimedModel
+                ? (0, fingerprint_baseline_js_1.claimedModelToFamily)(options.claimedModel)
+                : undefined;
             const adjustedConfidence = riskFlags.length > 0
                 ? Math.max(0, confidence - 0.15 * Math.min(riskFlags.length, 3))
                 : confidence;
@@ -899,6 +905,13 @@ async function runProbes(options) {
                 predictedCandidates: candidates,
                 riskFlags,
                 evidence,
+                // Original-page verdict: claimed family present among candidates still
+                // resolves to "same family — exact model unconfirmed", not a mismatch.
+                verdict: {
+                    ...(0, candidate_matcher_js_1.deriveFamilyVerdict)(candidates, claimedFamily),
+                    trueModel: null,
+                    spoofMethod: null,
+                },
             };
         }
     }

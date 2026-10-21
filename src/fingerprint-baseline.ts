@@ -117,6 +117,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["jsonDiscipline", "pure_json", 1.0],
       ["jsonDiscipline", "markdown_polluted", -0.5],
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["linguisticFingerprint", "overall_stability", 2.5],
       ["linguisticFingerprint", "fr_pm_bayrou", 1.0],  // Recal 2026-04-17: GPT-5.4=0.91 — strong openai signal
       ["linguisticFingerprint", "fr_pm_barnier", 0.5],
@@ -177,6 +178,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["jsonDiscipline", "preamble_text", 1.0],
       ["jsonDiscipline", "markdown_polluted", 0.5],
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["selfClaim", "openai", -3.0],
     ],
   },
@@ -207,6 +209,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       // Gemini exhibits stable self-reporting across runs
       ["linguisticFingerprint", "overall_stability",      1.5],
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["selfClaim", "openai", -3.0],
     ],
   },
@@ -220,6 +223,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["jsonDiscipline", "markdown_polluted", 1.0],
       ["refusal", "no_refusal", 1.5],
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["selfClaim", "openai", -3.0],
     ],
   },
@@ -232,6 +236,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["selfClaim", "mistral", 3.0],
       ["lexical", "concise_en", 1.0],
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["selfClaim", "openai", -3.0],
       ["selfClaim", "kiro", -4.0],   // KIRO self-claim is never Mistral
     ],
@@ -246,6 +251,7 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["reasoning", "uses_chain_of_thought", 1.0],
       ["lexical", "uses_dash_bullets", 1.5],  // DeepSeek also uses dash bullets
       ["selfClaim", "claude", -3.0],
+      ["selfClaim", "glm", -3.0],
       ["selfClaim", "openai", -3.0],
     ],
   },
@@ -257,6 +263,8 @@ export const FAMILY_BASELINES: FamilyBaseline[] = [
       ["selfClaim", "grok", -4.0],   // a Grok self-ID is never zhipu (xai family added 2026-07-10)
       ["selfClaim", "vague", 1.5],
       ["selfClaim", "kiro", -4.0],   // KIRO self-claim is never Zhipu
+      ["selfClaim", "glm", 4.0],     // honest "I am GLM / ChatGLM / Z.ai" self-report (attack-resistant)
+      ["linguisticFingerprint", "meta_creator_zhipu", 3.0], // "created by Z.ai / Zhipu"
       ["linguisticFingerprint", "overall_instability", 1.2],
       ["linguisticFingerprint", "jp_pm_old", 1.5],       // GLM knows 野田佳彦 (2011) — reduced: Claude sometimes knows older PMs
       ["linguisticFingerprint", "fr_pm_old", 2.0],       // GLM doesn't know Barnier/Bayrou

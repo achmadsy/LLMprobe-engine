@@ -12,7 +12,7 @@ export interface ActiveRunState {
     startedAt: string;
     abortController: AbortController;
 }
-export declare const SIDECAR_VERSION = "0.13.0";
+export declare const SIDECAR_VERSION = "0.14.0";
 export declare const SIDECAR_LICENSE = "AGPL-3.0-only";
 export declare const SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 export declare class SidecarServer {

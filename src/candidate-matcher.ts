@@ -2,6 +2,15 @@
 
 import { FAMILY_BASELINES, claimedModelToFamily } from "./fingerprint-baseline.js";
 import type { FingerprintFeatureSet, IdentityCandidate, IdentityStatus } from "./identity-report.js";
+import type { ConfidenceBand, VerdictStatus } from "./identity-verdict.js";
+
+/** Original-page verdict object: family-level resolution with explicit status. */
+export interface FamilyVerdict {
+  status: VerdictStatus;
+  trueFamily: string | null;
+  reasoning: string[];
+  confidence: ConfidenceBand;
+}
 
 /**
  * Score each family baseline against the observed feature set.
@@ -98,4 +107,76 @@ export function deriveVerdictFromClaimedModel(
   const claimedFamily = claimedModel ? claimedModelToFamily(claimedModel) : undefined;
   const verdict = deriveVerdict(candidates, claimedFamily);
   return { ...verdict, predictedFamily: candidates[0]?.family };
+}
+
+function confidenceBand(score: number): ConfidenceBand {
+  return score >= 0.65 ? "high" : score >= 0.35 ? "medium" : "low";
+}
+
+/**
+ * Original-page verdict: even when the exact sub-model can't be confirmed, a
+ * claimed family that appears among the candidates resolves to
+ * "clean_match_family_only" instead of a flat mismatch. This matches the
+ * official-page behavior for e.g. brand-new GLM Flash releases.
+ */
+export function deriveFamilyVerdict(
+  candidates: IdentityCandidate[],
+  claimedFamily: string | undefined,
+): FamilyVerdict {
+  if (candidates.length === 0) {
+    return {
+      status: "insufficient_data", trueFamily: claimedFamily ?? null,
+      confidence: "low", reasoning: ["No behavioral signals detected"],
+    };
+  }
+  const top = candidates[0];
+  const claimed = claimedFamily
+    ? candidates.find(c => c.family === claimedFamily)
+    : undefined;
+
+  if (claimed && top.family === claimedFamily && top.score > 0.5) {
+    return {
+      status: "clean_match",
+      trueFamily: claimedFamily,
+      confidence: confidenceBand(top.score),
+      reasoning: [
+        `Behavior most consistent with ${top.model} (score: ${top.score.toFixed(2)})`,
+        ...top.reasons.slice(0, 3),
+      ],
+    };
+  }
+
+  if (claimed && claimed.score >= 0.2) {
+    return {
+      status: "clean_match_family_only",
+      trueFamily: claimedFamily ?? null,
+      confidence: confidenceBand(claimed.score),
+      reasoning: [
+        `Evidence leans toward ${top.model} (${Math.round(top.score * 100)}%) rather than the claimed ${claimed.model} (${Math.round(claimed.score * 100)}%), but the claimed family is present — same family, exact model unconfirmed`,
+        `Likelihood gap ${Math.abs(top.score - claimed.score).toFixed(2)}; per-signal vote: ${candidates.map(c => `${c.model} ${Math.round(c.score * 100)}%`).join(" : ")}`,
+      ],
+    };
+  }
+
+  if (top.score > 0.4) {
+    return {
+      status: "plain_mismatch",
+      trueFamily: top.family,
+      confidence: confidenceBand(top.score),
+      reasoning: [
+        `Behavior most consistent with ${top.model} (score: ${top.score.toFixed(2)})`,
+        claimedFamily
+          ? `Claimed family ${claimedFamily} not among candidates`
+          : "No claimed family supplied",
+        ...top.reasons.slice(0, 2),
+      ],
+    };
+  }
+
+  return {
+    status: "ambiguous",
+    trueFamily: top.family,
+    confidence: "low",
+    reasoning: [`No stable majority: ${candidates.map(c => `${c.model} ${Math.round(c.score * 100)}%`).join(" : ")}`],
+  };
 }

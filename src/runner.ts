@@ -8,7 +8,8 @@ import { detectTokenInflation, TOKEN_INFLATION_THRESHOLD } from "./token-inflati
 import { checkSSECompliance } from "./sse-compliance.js";
 import { runContextCheck } from "./context-check.js";
 import { extractFingerprint } from "./fingerprint-extractor.js";
-import { matchCandidates, deriveVerdictFromClaimedModel } from "./candidate-matcher.js";
+import { matchCandidates, deriveVerdictFromClaimedModel, deriveFamilyVerdict } from "./candidate-matcher.js";
+import { claimedModelToFamily } from "./fingerprint-baseline.js";
 import { classifyChannelSignature } from "./channel-signature.js";
 import { extractThinkingBlock, getThinkingConfig, MAX_SIGNATURE_RESPONSE_BYTES, readBoundedResponse, verifySignatureRoundtrip } from "./signature-probe.js";
 import { judgeFingerprint } from "./fingerprint-judge.js";
@@ -790,8 +791,10 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       messages.push({ role: "user", content: userContent });
 
       // ── max_tokens: per-probe override → scoring fallback ───────────────
+      // Reasoning models burn hidden CoT tokens before the visible answer, so
+      // the exact-answer budget must leave headroom or they return "".
       const isExact = probe.scoring === "exact_match" || probe.scoring === "exact_response";
-      const maxTokens = probe.maxTokens ?? (isExact ? 64 : 1024);
+      const maxTokens = probe.maxTokens ?? (isExact ? 768 : 1024);
 
       const useStream = probe.scoring !== "header_check";
       const rawSseLines: string[] = [];
@@ -1039,6 +1042,9 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         candidates,
         options.claimedModel,
       );
+      const claimedFamily = options.claimedModel
+        ? claimedModelToFamily(options.claimedModel)
+        : undefined;
       const adjustedConfidence = riskFlags.length > 0
         ? Math.max(0, confidence - 0.15 * Math.min(riskFlags.length, 3))
         : confidence;
@@ -1051,6 +1057,13 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         predictedCandidates: candidates,
         riskFlags,
         evidence,
+        // Original-page verdict: claimed family present among candidates still
+        // resolves to "same family — exact model unconfirmed", not a mismatch.
+        verdict: {
+          ...deriveFamilyVerdict(candidates, claimedFamily),
+          trueModel: null,
+          spoofMethod: null,
+        },
       };
     }
   }

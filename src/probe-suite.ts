@@ -492,6 +492,9 @@ export const PROBE_SUITE: ProbeDefinition[] = [
     acCategory: "AC-1",
     dynamicCanary: true,
     prompt: "Reply with ONLY the exact text shown below — no extra characters, no newlines before or after, no explanation:\n\n{CANARY}",
+    // Reasoning models burn hidden CoT tokens before the visible canary, so
+    // the exact-answer budget must leave headroom (see isExact fallback).
+    maxTokens: 768,
     // expectedExact is a static fallback; the run route supplies the live
     // canary via overrideExpectedExact when dynamicCanary is true.
     expectedExact: "AUGMENT_CANARY_PLACEHOLDER",
@@ -671,7 +674,7 @@ export const PROBE_SUITE: ProbeDefinition[] = [
     description: "64x64 pure-red PNG image block; verifies correct color recognition",
     prompt: "What color is this image? Reply with a single English word.",
     passIfContains: [PROBE_IMAGE_KEYWORD],
-    maxTokens: 64,
+    maxTokens: 768,
     multimodalContent: {
       kind: "image",
       dataB64: PROBE_IMAGE_PNG_B64,
@@ -686,7 +689,7 @@ export const PROBE_SUITE: ProbeDefinition[] = [
     description: "PDF document block; verifies the model reads the embedded word",
     prompt: "What single English word appears in this PDF? Reply with just the word in uppercase.",
     passIfContains: [PROBE_PDF_KEYWORD],
-    maxTokens: 64,
+    maxTokens: 768,
     multimodalContent: {
       kind: "pdf",
       dataB64: PROBE_PDF_B64,

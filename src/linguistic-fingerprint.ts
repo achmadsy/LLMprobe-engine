@@ -273,7 +273,7 @@ export function extractLinguisticFeatures(
     f["meta_creator_anthropic"] = mode.includes("anthropic") ? 1 : 0;
     f["meta_creator_openai"]    = mode.includes("openai") ? 1 : 0;
     f["meta_creator_google"]    = mode.includes("google") || mode.includes("deepmind") ? 1 : 0;
-    f["meta_creator_zhipu"]     = mode.includes("zhipu") || mode.includes("智谱") ? 1 : 0;
+    f["meta_creator_zhipu"]     = mode.includes("zhipu") || mode.includes("智谱") || mode.includes("z.ai") || mode.includes("chatglm") ? 1 : 0;
     f["meta_creator_stability"] = stability;
   }
 

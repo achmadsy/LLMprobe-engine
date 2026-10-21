@@ -20,12 +20,14 @@ singleRunFallbacks = {}) {
         mistral: has(selfText, ["mistral"]) ? 1 : 0,
         deepseek: has(selfText, ["deepseek"]) ? 1 : 0,
         grok: has(selfText, ["grok", "xai"]) ? 1 : 0,
+        // Zhipu GLM: honest self-reports say "GLM", "ChatGLM", "Z.ai" or 智谱.
+        glm: has(selfText, ["glm", "z.ai", "zhipu", "智谱"]) ? 1 : 0,
         // Amazon Q Developer / Kiro: coding-agent wrapper injecting ~2000-token hidden system prompt
         kiro: has(selfText, ["kiro", "amazon q developer", "kiro-cli"]) ? 1 : 0,
         vague: selfText.length > 0 && !has(selfText, [
             "claude", "anthropic", "chatgpt", "gpt", "openai", "qwen", "通义",
             "gemini", "llama", "mistral", "deepseek", "kiro", "amazon q",
-            "grok", "xai",
+            "grok", "xai", "glm", "z.ai", "zhipu", "智谱",
         ]) ? 1 : 0,
     };
     // ── Lexical style signals ─────────────────────────────────────────────────

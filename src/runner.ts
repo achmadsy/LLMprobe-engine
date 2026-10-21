@@ -79,6 +79,11 @@ export interface RunOptions {
   /** Include optional probes (e.g. context_length). Default: false */
   includeOptional?: boolean;
   /**
+   * Ordered probe IDs to execute. Unknown IDs and duplicates are rejected.
+   * When omitted, the full engine suite is used for backward compatibility.
+   */
+  probeIds?: string[];
+  /**
    * Transport-level retries per request (network errors, 5xx, 429).
    * Semantic failures are never retried. Default: 2. Use 0 to disable.
    */
@@ -323,7 +328,28 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
   const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
   const startedAt = new Date().toISOString();
 
-  const probes = PROBE_SUITE.filter(p => includeOptional || !p.optional);
+  let selectedSuite = PROBE_SUITE;
+  if (options.probeIds !== undefined) {
+    if (!Array.isArray(options.probeIds) || options.probeIds.length === 0 || options.probeIds.length > PROBE_SUITE.length) {
+      throw new Error("probeIds must be a non-empty array within the suite size limit");
+    }
+    const byId = new Map(PROBE_SUITE.map((probe) => [probe.id, probe]));
+    const seen = new Set<string>();
+    selectedSuite = options.probeIds.map((id) => {
+      if (typeof id !== "string" || !id || seen.has(id)) {
+        throw new Error("probeIds must contain unique non-empty strings");
+      }
+      seen.add(id);
+      const probe = byId.get(id);
+      if (!probe) throw new Error(`Unknown probe ID: ${id}`);
+      return probe;
+    });
+  }
+  // Explicit selectors are authoritative and may include optional probes. The
+  // legacy full-suite path keeps includeOptional behavior for API compatibility.
+  const probes = options.probeIds !== undefined
+    ? selectedSuite
+    : selectedSuite.filter(p => includeOptional || !p.optional);
   const results: ProbeResult[] = [];
 
   // ── Pre-flight ────────────────────────────────────────────────────────────

@@ -178,7 +178,29 @@ async function runProbes(options) {
     const targetSecrets = [apiKey, ...(0, custom_headers_js_1.customHeaderSecrets)(customHeaders)];
     const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const startedAt = new Date().toISOString();
-    const probes = probe_suite_js_1.PROBE_SUITE.filter(p => includeOptional || !p.optional);
+    let selectedSuite = probe_suite_js_1.PROBE_SUITE;
+    if (options.probeIds !== undefined) {
+        if (!Array.isArray(options.probeIds) || options.probeIds.length === 0 || options.probeIds.length > probe_suite_js_1.PROBE_SUITE.length) {
+            throw new Error("probeIds must be a non-empty array within the suite size limit");
+        }
+        const byId = new Map(probe_suite_js_1.PROBE_SUITE.map((probe) => [probe.id, probe]));
+        const seen = new Set();
+        selectedSuite = options.probeIds.map((id) => {
+            if (typeof id !== "string" || !id || seen.has(id)) {
+                throw new Error("probeIds must contain unique non-empty strings");
+            }
+            seen.add(id);
+            const probe = byId.get(id);
+            if (!probe)
+                throw new Error(`Unknown probe ID: ${id}`);
+            return probe;
+        });
+    }
+    // Explicit selectors are authoritative and may include optional probes. The
+    // legacy full-suite path keeps includeOptional behavior for API compatibility.
+    const probes = options.probeIds !== undefined
+        ? selectedSuite
+        : selectedSuite.filter(p => includeOptional || !p.optional);
     const results = [];
     // ── Pre-flight ────────────────────────────────────────────────────────────
     const targetHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };

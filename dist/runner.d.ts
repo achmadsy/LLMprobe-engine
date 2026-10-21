@@ -46,6 +46,11 @@ export interface RunOptions {
     /** Include optional probes (e.g. context_length). Default: false */
     includeOptional?: boolean;
     /**
+     * Ordered probe IDs to execute. Unknown IDs and duplicates are rejected.
+     * When omitted, the full engine suite is used for backward compatibility.
+     */
+    probeIds?: string[];
+    /**
      * Transport-level retries per request (network errors, 5xx, 429).
      * Semantic failures are never retried. Default: 2. Use 0 to disable.
      */

@@ -43,8 +43,8 @@ const runner_js_1 = require("./runner.js");
 const egress_guard_js_1 = require("./egress-guard.js");
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
-const probe_suite_js_1 = require("./probe-suite.js");
-exports.SIDECAR_VERSION = "0.12.0";
+const original_suite_js_1 = require("./original-suite.js");
+exports.SIDECAR_VERSION = "0.13.0";
 exports.SIDECAR_LICENSE = "AGPL-3.0-only";
 exports.SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 class SidecarServer {
@@ -169,7 +169,7 @@ class SidecarServer {
     handleProbes(req, res) {
         if (!this.authenticate(req, res))
             return;
-        const probes = probe_suite_js_1.PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
+        const probes = original_suite_js_1.ORIGINAL_PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
             id,
             label,
             group,
@@ -419,6 +419,9 @@ class SidecarServer {
         try {
             const report = await (0, runner_js_1.runProbes)({
                 ...body,
+                // Public sidecar runs always use the server-authoritative original
+                // 86-probe contract. Never trust a caller-supplied selector here.
+                probeIds: [...original_suite_js_1.ORIGINAL_SUITE_IDS],
                 // Pass validated maps explicitly: the raw body spread may carry
                 // unvalidated row arrays that the runner would not honor.
                 customHeaders: targetCustomHeaders,

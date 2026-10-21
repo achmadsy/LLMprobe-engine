@@ -5,6 +5,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import * as http from "http";
 import { createSidecarServer, SidecarServer, SIDECAR_VERSION, SIDECAR_LICENSE, SIDECAR_SOURCE } from "../sidecar.js";
 import { redactSecrets, truncateString, boundError } from "../redaction.js";
+import { ORIGINAL_SUITE_IDS } from "../original-suite.js";
 
 describe("BazaarLink Probe Engine Sidecar API", () => {
   const TEST_TOKEN = "secret-sidecar-token-12345";
@@ -177,7 +178,8 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
         probes: Array<Record<string, unknown>>;
       };
       expect(json.version).toBe(SIDECAR_VERSION);
-      expect(json.probes.length).toBeGreaterThan(0);
+      expect(json.probes.map((probe) => probe.id)).toEqual(ORIGINAL_SUITE_IDS);
+      expect(json.probes).toHaveLength(86);
       expect(json.probes[0]).toEqual(expect.objectContaining({
         id: expect.any(String),
         label: expect.any(String),
@@ -346,6 +348,8 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
           apiKey: "sk-super-secret-key-12345",
           modelId: "test-model",
           timeoutMs: 5000,
+          // Caller input must not narrow or expand the public sidecar suite.
+          probeIds: ["identity_style_en"],
         }),
       });
 
@@ -356,6 +360,9 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
       expect(text).toContain("event: start");
       expect(text).toContain("event: progress");
       expect(text).toContain("event: complete");
+      const progressEvents = text.match(/event: progress/g) ?? [];
+      expect(progressEvents).toHaveLength(86);
+      expect(text).toContain('"total":86');
 
       // Verify that the secret apiKey was NOT leaked into the SSE stream
       expect(text).not.toContain("sk-super-secret-key-12345");

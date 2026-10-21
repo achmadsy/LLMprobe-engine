@@ -2,6 +2,8 @@ export { runProbes } from "./runner.js";
 export type { RunOptions, RunReport, ProbeResult, BaselineMap } from "./runner.js";
 export { PROBE_SUITE, autoScore, generateCanary } from "./probe-suite.js";
 export type { ProbeDefinition, ProbeGroup, ScoringMode } from "./probe-suite.js";
+export { ORIGINAL_PROBE_SUITE, ORIGINAL_SUITE_GROUPS, ORIGINAL_SUITE_IDS, originalSuiteGroupOf } from "./original-suite.js";
+export type { OriginalSuiteGroup } from "./original-suite.js";
 export { computeProbeScore } from "./probe-score.js";
 export type { ProbeRunItemLike } from "./probe-score.js";
 export { classifyPreflightResult } from "./probe-preflight.js";

@@ -319,11 +319,11 @@ function response(body, status = 200) {
     });
 });
 (0, vitest_1.describe)("ac5_signature_verify suite integration", () => {
-    (0, vitest_1.it)("PROBE_SUITE contains exactly 97 unique probes", async () => {
+    (0, vitest_1.it)("PROBE_SUITE contains exactly 100 unique probes", async () => {
         const { PROBE_SUITE } = await Promise.resolve().then(() => __importStar(require("../probe-suite.js")));
-        (0, vitest_1.expect)(PROBE_SUITE).toHaveLength(97);
+        (0, vitest_1.expect)(PROBE_SUITE).toHaveLength(100);
         const ids = new Set(PROBE_SUITE.map((p) => p.id));
-        (0, vitest_1.expect)(ids.size).toBe(97);
+        (0, vitest_1.expect)(ids.size).toBe(100);
     });
     (0, vitest_1.it)("ac5_signature_verify definition matches AC-5 specification", async () => {
         const { PROBE_SUITE, autoScore } = await Promise.resolve().then(() => __importStar(require("../probe-suite.js")));

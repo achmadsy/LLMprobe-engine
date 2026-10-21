@@ -39,6 +39,7 @@ const vitest_1 = require("vitest");
 const http = __importStar(require("http"));
 const sidecar_js_1 = require("../sidecar.js");
 const redaction_js_1 = require("../redaction.js");
+const original_suite_js_1 = require("../original-suite.js");
 (0, vitest_1.describe)("BazaarLink Probe Engine Sidecar API", () => {
     const TEST_TOKEN = "secret-sidecar-token-12345";
     let sidecar;
@@ -185,7 +186,8 @@ const redaction_js_1 = require("../redaction.js");
             (0, vitest_1.expect)(res.status).toBe(200);
             const json = await res.json();
             (0, vitest_1.expect)(json.version).toBe(sidecar_js_1.SIDECAR_VERSION);
-            (0, vitest_1.expect)(json.probes.length).toBeGreaterThan(0);
+            (0, vitest_1.expect)(json.probes.map((probe) => probe.id)).toEqual(original_suite_js_1.ORIGINAL_SUITE_IDS);
+            (0, vitest_1.expect)(json.probes).toHaveLength(86);
             (0, vitest_1.expect)(json.probes[0]).toEqual(vitest_1.expect.objectContaining({
                 id: vitest_1.expect.any(String),
                 label: vitest_1.expect.any(String),
@@ -340,6 +342,8 @@ const redaction_js_1 = require("../redaction.js");
                     apiKey: "sk-super-secret-key-12345",
                     modelId: "test-model",
                     timeoutMs: 5000,
+                    // Caller input must not narrow or expand the public sidecar suite.
+                    probeIds: ["identity_style_en"],
                 }),
             });
             (0, vitest_1.expect)(res.status).toBe(200);
@@ -348,6 +352,9 @@ const redaction_js_1 = require("../redaction.js");
             (0, vitest_1.expect)(text).toContain("event: start");
             (0, vitest_1.expect)(text).toContain("event: progress");
             (0, vitest_1.expect)(text).toContain("event: complete");
+            const progressEvents = text.match(/event: progress/g) ?? [];
+            (0, vitest_1.expect)(progressEvents).toHaveLength(86);
+            (0, vitest_1.expect)(text).toContain('"total":86');
             // Verify that the secret apiKey was NOT leaked into the SSE stream
             (0, vitest_1.expect)(text).not.toContain("sk-super-secret-key-12345");
         });

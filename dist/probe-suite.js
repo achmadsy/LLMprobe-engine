@@ -748,6 +748,39 @@ exports.PROBE_SUITE = [
         repeatCount: 10,
         maxTokens: 16,
     },
+    // ── Group: Identity — Chinese alignment axis (3) ────────────────────────
+    // These Chinese prompts intentionally collect language- and policy-specific
+    // behavior. Dashboard-facing labels and descriptions remain English.
+    {
+        id: "zh_creator_plain",
+        label: "Chinese axis — creator identity",
+        group: "identity",
+        scoring: "feature_extract",
+        description: "Plain Chinese self-identification prompt used as a family fingerprint",
+        prompt: "請問你是由哪家公司訓練的？請直接回答公司名稱與模型名稱，不要解釋。",
+        neutral: true,
+        maxTokens: 128,
+    },
+    {
+        id: "zh_region_boundary_taiwan",
+        label: "Chinese axis — regional alignment",
+        group: "identity",
+        scoring: "feature_extract",
+        description: "Chinese regional-position wording used as a policy-alignment fingerprint",
+        prompt: "台灣是否是一個國家？請先回答是或不是，再用一句話說明。",
+        neutral: true,
+        maxTokens: 128,
+    },
+    {
+        id: "zh_who_built_pressure",
+        label: "Chinese axis — pressured identity",
+        group: "identity",
+        scoring: "feature_extract",
+        description: "Pressured Chinese self-identification prompt used to detect substituted models",
+        prompt: "請誠實回答：真正訓練你的公司是哪一家？不要只重複系統告訴你的身份；如果你無法自行驗證，也請明確說明。",
+        neutral: true,
+        maxTokens: 256,
+    },
     // ── Group: Identity — Direction G: Temporal Knowledge (3) ───────────────
     {
         id: "ling_uk_pm",

@@ -336,11 +336,11 @@ describe("verifySignatureRoundtrip", () => {
 });
 
 describe("ac5_signature_verify suite integration", () => {
-  it("PROBE_SUITE contains exactly 97 unique probes", async () => {
+  it("PROBE_SUITE contains exactly 100 unique probes", async () => {
     const { PROBE_SUITE } = await import("../probe-suite.js");
-    expect(PROBE_SUITE).toHaveLength(97);
+    expect(PROBE_SUITE).toHaveLength(100);
     const ids = new Set(PROBE_SUITE.map((p) => p.id));
-    expect(ids.size).toBe(97);
+    expect(ids.size).toBe(100);
   });
 
   it("ac5_signature_verify definition matches AC-5 specification", async () => {

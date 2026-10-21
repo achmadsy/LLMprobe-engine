@@ -7,7 +7,7 @@ import { runProbes, type RunOptions, type RunReport, type ProbeResult } from "./
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions, EgressError } from "./egress-guard.js";
 import { normalizeCustomHeaders, customHeaderSecrets, mergeCustomHeaders, CustomHeadersError } from "./custom-headers.js";
 import { redactSecrets, truncateString, boundError, sanitizeProbeResult, sanitizeReport } from "./redaction.js";
-import { PROBE_SUITE } from "./probe-suite.js";
+import { ORIGINAL_PROBE_SUITE, ORIGINAL_SUITE_IDS } from "./original-suite.js";
 
 export interface SidecarConfig {
   port?: number;
@@ -24,7 +24,7 @@ export interface ActiveRunState {
   abortController: AbortController;
 }
 
-export const SIDECAR_VERSION = "0.12.0";
+export const SIDECAR_VERSION = "0.13.0";
 export const SIDECAR_LICENSE = "AGPL-3.0-only";
 export const SIDECAR_SOURCE = "https://github.com/achmadsy/LLMprobe-engine";
 
@@ -168,7 +168,7 @@ export class SidecarServer {
   private handleProbes(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!this.authenticate(req, res)) return;
 
-    const probes = PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
+    const probes = ORIGINAL_PROBE_SUITE.map(({ id, label, group, description, optional, isNew, neutral, scoring, prompt, expectedExact, expectedContains, passIfContains }) => ({
       id,
       label,
       group,
@@ -424,6 +424,9 @@ export class SidecarServer {
     try {
       const report = await runProbes({
         ...body,
+        // Public sidecar runs always use the server-authoritative original
+        // 86-probe contract. Never trust a caller-supplied selector here.
+        probeIds: [...ORIGINAL_SUITE_IDS],
         // Pass validated maps explicitly: the raw body spread may carry
         // unvalidated row arrays that the runner would not honor.
         customHeaders: targetCustomHeaders,

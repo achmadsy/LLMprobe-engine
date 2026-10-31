@@ -198,6 +198,32 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
     });
   });
 
+  describe("Saved replay", () => {
+    it("rejudges canonical saved checks without calling the target", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+        method: "POST", headers: { Authorization: `Bearer ${TEST_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "rejudge-saved", baseUrl: "https://example.com/v1", modelId: "m", operation: "rejudge",
+          previousResults: [{ probeId: "symbol_exact", label: "symbol", group: "integrity", neutral: false, status: "done", passed: false,
+            passReason: "old", ttftMs: 1, durationMs: 2, inputTokens: 3, outputTokens: 4, tps: 5, response: "「這是測試」", error: null }] }),
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const complete = text.split("\n\n").find(event => event.startsWith("event: complete"))!;
+      const { report } = JSON.parse(complete.split("data: ")[1]);
+      expect(report.results).toHaveLength(1);
+      expect(report.results[0]).toMatchObject({ probeId: "symbol_exact", passed: true, durationMs: 2 });
+    });
+
+    it("rejects invalid retry selectors before starting", async () => {
+      const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/runs`, {
+        method: "POST", headers: { Authorization: `Bearer ${TEST_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ baseUrl: "https://example.com/v1", modelId: "m", operation: "retry", retryProbeId: "not-in-public-suite", previousResults: [] }),
+      });
+      expect(res.status).toBe(400);
+      expect(sidecar.getActiveRun()).toBeNull();
+    });
+  });
+
   describe("Model Discovery", () => {
     it("fetches, normalizes, and deduplicates OpenAI-compatible models", async () => {
       modelsAuthorization = undefined;

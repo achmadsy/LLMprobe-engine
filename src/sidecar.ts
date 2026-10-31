@@ -128,6 +128,7 @@ export class SidecarServer {
         status: "ok",
         service: "bazaarlink-probe-engine-sidecar",
         version: SIDECAR_VERSION,
+        capabilities: ["saved-result-replay"],
         license: SIDECAR_LICENSE,
         source: SIDECAR_SOURCE,
         activeRun: this.getActiveRun(),
@@ -364,6 +365,32 @@ export class SidecarServer {
       if (!(err instanceof CustomHeadersError)) throw err;
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: err.message, code: "bad_request" } }));
+      return;
+    }
+
+    const operation = body.operation;
+    if (operation !== undefined) {
+      const allowedIds = new Set<string>(ORIGINAL_SUITE_IDS);
+      const rows = body.previousResults;
+      const validRows = Array.isArray(rows) && rows.length > 0 && rows.length <= allowedIds.size
+        && new Set(rows.map(row => row?.probeId)).size === rows.length
+        && rows.every(row => row && allowedIds.has(row.probeId)
+          && ["done", "error", "skipped"].includes(row.status)
+          && (row.response === null || (typeof row.response === "string" && row.response.length <= 65536)));
+      if (!["retry", "rejudge"].includes(operation) || !validRows
+          || (operation === "retry" && !allowedIds.has(body.retryProbeId ?? ""))
+          || (body.retryProbeId !== undefined && !allowedIds.has(body.retryProbeId))) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Invalid replay operation, saved results, or judge configuration", code: "bad_request" } }));
+        return;
+      }
+    }
+
+    // readBoundedBody yields: another request may have acquired the slot since
+    // the first concurrency check. Acquire only after all validation completes.
+    if (this.activeRun !== null) {
+      res.writeHead(409, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Another probe run is currently active", code: "concurrency_limit" } }));
       return;
     }
 

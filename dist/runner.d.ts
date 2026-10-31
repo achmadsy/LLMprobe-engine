@@ -15,7 +15,10 @@ export interface ProbeResult {
     outputTokens: number | null;
     tps: number | null;
     response: string | null;
+    responseTruncated?: boolean;
     error: string | null;
+    /** Judge failures are separate from target transport errors. */
+    judgeError?: string | null;
     /** Scoring mode of the probe, for consumer-side expected/actual display. */
     scoring?: string;
     /** Expected/reference response (or containment keywords) for auditability. */
@@ -50,6 +53,10 @@ export interface RunOptions {
      * When omitted, the full engine suite is used for backward compatibility.
      */
     probeIds?: string[];
+    /** Internal replay operations reuse recorded responses; never sent to the target. */
+    operation?: "retry" | "rejudge";
+    retryProbeId?: string;
+    previousResults?: ProbeResult[];
     /**
      * Transport-level retries per request (network errors, 5xx, 429).
      * Semantic failures are never retried. Default: 2. Use 0 to disable.

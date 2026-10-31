@@ -202,33 +202,36 @@ async function runProbes(options) {
     const probes = options.probeIds !== undefined
         ? selectedSuite
         : selectedSuite.filter(p => includeOptional || !p.optional);
+    const replay = options.operation === "retry" || options.operation === "rejudge";
+    const previousById = new Map((options.previousResults ?? []).map(row => [row.probeId, row]));
     const results = [];
     // ── Pre-flight ────────────────────────────────────────────────────────────
     const targetHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
     (0, custom_headers_js_1.mergeCustomHeaders)(targetHeaders, customHeaders);
-    try {
-        const pfRes = await fetchImpl(chatUrl, {
-            method: "POST",
-            headers: targetHeaders,
-            body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
-            signal: (0, egress_guard_js_1.combineSignals)(45000, outerSignal),
-        });
-        if (!pfRes.ok) {
-            const rawBody = await (0, signature_probe_js_1.readBoundedResponse)(pfRes, MAX_PREFLIGHT_RESPONSE_BYTES).catch(() => "");
-            const { outcome, reason } = (0, probe_preflight_js_1.classifyPreflightResult)(pfRes.status, rawBody);
-            if (outcome === "abort") {
-                for (const probe of probes) {
-                    results.push({ probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                        status: "error", passed: false, passReason: null, ttftMs: null, durationMs: null,
-                        inputTokens: null, outputTokens: null, tps: null, response: null, error: reason });
+    if (!replay)
+        try {
+            const pfRes = await fetchImpl(chatUrl, {
+                method: "POST",
+                headers: targetHeaders,
+                body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
+                signal: (0, egress_guard_js_1.combineSignals)(45000, outerSignal),
+            });
+            if (!pfRes.ok) {
+                const rawBody = await (0, signature_probe_js_1.readBoundedResponse)(pfRes, MAX_PREFLIGHT_RESPONSE_BYTES).catch(() => "");
+                const { outcome, reason } = (0, probe_preflight_js_1.classifyPreflightResult)(pfRes.status, rawBody);
+                if (outcome === "abort") {
+                    for (const probe of probes) {
+                        results.push({ probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                            status: "error", passed: false, passReason: null, ttftMs: null, durationMs: null,
+                            inputTokens: null, outputTokens: null, tps: null, response: null, error: reason });
+                    }
+                    const { low, high } = (0, probe_score_js_1.computeProbeScore)(results.map(r => ({ status: r.status, passed: r.passed, neutral: r.neutral })));
+                    return { baseUrl, modelId, startedAt, completedAt: new Date().toISOString(), score: low, scoreMax: high,
+                        totalInputTokens: null, totalOutputTokens: null, results };
                 }
-                const { low, high } = (0, probe_score_js_1.computeProbeScore)(results.map(r => ({ status: r.status, passed: r.passed, neutral: r.neutral })));
-                return { baseUrl, modelId, startedAt, completedAt: new Date().toISOString(), score: low, scoreMax: high,
-                    totalInputTokens: null, totalOutputTokens: null, results };
             }
         }
-    }
-    catch { /* network issues on preflight — proceed anyway */ }
+        catch { /* network issues on preflight — proceed anyway */ }
     // ── Run each probe ────────────────────────────────────────────────────────
     let idx = 0;
     for (const probe of probes) {
@@ -237,6 +240,35 @@ async function runProbes(options) {
         }
         idx++;
         let result;
+        if (replay && (options.operation === "rejudge" || probe.id !== options.retryProbeId)) {
+            const previous = previousById.get(probe.id);
+            if (!previous)
+                continue;
+            result = { ...previous };
+            // Transport/header/dynamic-canary checks cannot be reconstructed from
+            // response text. Preserve those verdicts and re-score supported text checks.
+            if (options.operation === "rejudge" && (!options.retryProbeId || probe.id === options.retryProbeId) && probe.scoring === "llm_judge"
+                && previous.status === "done" && !previous.responseTruncated && typeof previous.response === "string" && judge) {
+                const judged = baseline?.[probe.id]
+                    ? await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe, previous.response, baseline[probe.id], judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders)
+                    : await runJudgeRubric(judge.baseUrl, judge.apiKey, judge.modelId, probe, previous.response, judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders);
+                result.passed = judged.passed;
+                result.passReason = judged.reason;
+                result.judgeError = judged.passed === null ? judged.reason : null;
+            }
+            if (options.operation === "rejudge" && (!options.retryProbeId || probe.id === options.retryProbeId)
+                && previous.status === "done" && !previous.responseTruncated && typeof previous.response === "string"
+                && ["keyword_match", "exact_match"].includes(probe.scoring)) {
+                const scored = (0, probe_suite_js_1.autoScore)(probe, previous.response, {}, "en");
+                if (scored) {
+                    result.passed = scored.passed;
+                    result.passReason = scored.reason;
+                }
+            }
+            results.push(result);
+            onProgress?.(result, idx, probes.length);
+            continue;
+        }
         // ── channel_signature ─────────────────────────────────────────────────
         if (probe.scoring === "channel_signature") {
             const t0 = Date.now();
@@ -826,8 +858,9 @@ async function runProbes(options) {
                 ?? (probe.passIfContains?.length ? probe.passIfContains.join(" | ") : null);
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                 status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
-                response: fullText.slice(0, 4000), passed, passReason, error: null,
-                scoring: probe.scoring, expected };
+                response: fullText.slice(0, 4000), responseTruncated: fullText.length > 4000, passed, passReason, error: null,
+                scoring: probe.scoring, expected,
+                judgeError: probe.scoring === "llm_judge" && judge && passed === null ? passReason : null };
         }
         catch (err) {
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,

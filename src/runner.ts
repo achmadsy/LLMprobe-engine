@@ -35,7 +35,10 @@ export interface ProbeResult {
   outputTokens: number | null;
   tps: number | null;
   response: string | null;
+  responseTruncated?: boolean;
   error: string | null;
+  /** Judge failures are separate from target transport errors. */
+  judgeError?: string | null;
   /** Scoring mode of the probe, for consumer-side expected/actual display. */
   scoring?: string;
   /** Expected/reference response (or containment keywords) for auditability. */
@@ -84,6 +87,10 @@ export interface RunOptions {
    * When omitted, the full engine suite is used for backward compatibility.
    */
   probeIds?: string[];
+  /** Internal replay operations reuse recorded responses; never sent to the target. */
+  operation?: "retry" | "rejudge";
+  retryProbeId?: string;
+  previousResults?: ProbeResult[];
   /**
    * Transport-level retries per request (network errors, 5xx, 429).
    * Semantic failures are never retried. Default: 2. Use 0 to disable.
@@ -351,13 +358,15 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
   const probes = options.probeIds !== undefined
     ? selectedSuite
     : selectedSuite.filter(p => includeOptional || !p.optional);
+  const replay = options.operation === "retry" || options.operation === "rejudge";
+  const previousById = new Map((options.previousResults ?? []).map(row => [row.probeId, row]));
   const results: ProbeResult[] = [];
 
   // ── Pre-flight ────────────────────────────────────────────────────────────
   const targetHeaders: Record<string, string> = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
   mergeCustomHeaders(targetHeaders, customHeaders);
 
-  try {
+  if (!replay) try {
     const pfRes = await fetchImpl(chatUrl, {
       method: "POST",
       headers: targetHeaders,
@@ -388,6 +397,35 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
     }
     idx++;
     let result: ProbeResult;
+
+    if (replay && (options.operation === "rejudge" || probe.id !== options.retryProbeId)) {
+      const previous = previousById.get(probe.id);
+      if (!previous) continue;
+      result = { ...previous };
+      // Transport/header/dynamic-canary checks cannot be reconstructed from
+      // response text. Preserve those verdicts and re-score supported text checks.
+      if (options.operation === "rejudge" && (!options.retryProbeId || probe.id === options.retryProbeId) && probe.scoring === "llm_judge"
+          && previous.status === "done" && !previous.responseTruncated && typeof previous.response === "string" && judge) {
+        const judged = baseline?.[probe.id]
+          ? await runJudgeWithBaseline(judge.baseUrl, judge.apiKey, judge.modelId, probe,
+              previous.response, baseline[probe.id], judge.threshold ?? 7, timeoutMs,
+              outerSignal, fetchImpl, judge.customHeaders)
+          : await runJudgeRubric(judge.baseUrl, judge.apiKey, judge.modelId, probe,
+              previous.response, judge.threshold ?? 7, timeoutMs, outerSignal, fetchImpl, judge.customHeaders);
+        result.passed = judged.passed;
+        result.passReason = judged.reason;
+        result.judgeError = judged.passed === null ? judged.reason : null;
+      }
+      if (options.operation === "rejudge" && (!options.retryProbeId || probe.id === options.retryProbeId)
+          && previous.status === "done" && !previous.responseTruncated && typeof previous.response === "string"
+          && ["keyword_match", "exact_match"].includes(probe.scoring)) {
+        const scored = autoScore(probe, previous.response, {}, "en");
+        if (scored) { result.passed = scored.passed; result.passReason = scored.reason; }
+      }
+      results.push(result);
+      onProgress?.(result, idx, probes.length);
+      continue;
+    }
 
     // ── channel_signature ─────────────────────────────────────────────────
     if (probe.scoring === "channel_signature") {
@@ -955,8 +993,9 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
 
       result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
         status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
-        response: fullText.slice(0, 4000), passed, passReason, error: null,
-        scoring: probe.scoring, expected };
+        response: fullText.slice(0, 4000), responseTruncated: fullText.length > 4000, passed, passReason, error: null,
+        scoring: probe.scoring, expected,
+        judgeError: probe.scoring === "llm_judge" && judge && passed === null ? passReason : null };
 
     } catch (err) {
       result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,

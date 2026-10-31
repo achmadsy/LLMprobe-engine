@@ -72,7 +72,9 @@ export function sanitizeProbeResult(res: ProbeResult, secrets?: string[]): Probe
     ...res,
     passReason: res.passReason ? truncateString(redactSecrets(res.passReason, secrets), 1000) : null,
     response: res.response ? truncateString(redactSecrets(res.response, secrets), 16384) : null,
+    responseTruncated: Boolean(res.responseTruncated || (res.response && res.response.length > 16384)),
     error: res.error ? truncateString(redactSecrets(res.error, secrets), 1000) : null,
+    judgeError: res.judgeError ? truncateString(redactSecrets(res.judgeError, secrets), 1000) : null,
   };
 }
 

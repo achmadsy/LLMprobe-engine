@@ -1,5 +1,6 @@
 import { type ReferenceEmbedding } from "./fingerprint-vectors.js";
 import type { IdentityAssessment } from "./identity-report.js";
+import { type DistributionEvidence } from "./distribution-evidence.js";
 import { type EgressOptions } from "./egress-guard.js";
 export interface ProbeResult {
     probeId: string;
@@ -57,6 +58,17 @@ export interface RunOptions {
     operation?: "retry" | "rejudge";
     retryProbeId?: string;
     previousResults?: ProbeResult[];
+    /** Fixed budget for explicitly selected subsets. Full supported GLM runs sample automatically; replay never samples. */
+    distributionSampling?: {
+        enabled: true;
+        maxCalls: 51;
+    };
+    savedDistributionEvidence?: DistributionEvidence;
+    onDistributionProgress?: (progress: {
+        attempts: number;
+        failures: number;
+        total: 51;
+    }) => void;
     /**
      * Transport-level retries per request (network errors, 5xx, 429).
      * Semantic failures are never retried. Default: 2. Use 0 to disable.

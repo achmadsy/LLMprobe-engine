@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "id": "glm53-start-plan-2026-11-01",
+  "state": "experimental",
+  "runtimePromotionAllowed": false,
+  "provenance": "Collected through 9Router glm Start Plan routes with ZCode wrapper and default thinking; not bare-inference coverage. Reference per-call proxy/account metadata unavailable.",
+  "limitations": [
+    "Older-sibling holdouts missing",
+    "Independent out-of-family controls missing",
+    "Expanded policy not calibrated",
+    "Validation includes a documented direct/decode5 proxy change"
+  ],
+  "references": [
+    {
+      "baseline": {
+        "modelId": "z-ai/glm-5.3",
+        "capturedAt": "2026-11-01T09:05:50.695Z",
+        "sampleCount": 540,
+        "probes": {
+          "day": {
+            "friday": 5,
+            "thursday": 23,
+            "wednesday": 31,
+            "monday": 1
+          },
+          "rand_dwarf": {
+            "happy": 26,
+            "sleepy": 20,
+            "doc": 14
+          },
+          "rand_gem": {
+            "diamond": 14,
+            "amethyst": 33,
+            "sapphire": 13
+          },
+          "rand_month": {
+            "august": 46,
+            "september": 13,
+            "march": 1
+          },
+          "rand_city": {
+            "singapore": 26,
+            "kyoto": 26,
+            "tokyo": 4,
+            "toronto": 3,
+            "oslo": 1
+          },
+          "rand_bird": {
+            "sparrow": 58,
+            "robin": 2
+          },
+          "rand_element": {
+            "oxygen": 53,
+            "fermium": 2,
+            "silicon": 1,
+            "gold": 2,
+            "carbon": 2
+          },
+          "rand_bignum": {
+            "417": 40,
+            "427": 17,
+            "437": 2,
+            "478": 1
+          },
+          "rand_fruit": {
+            "durian": 4,
+            "kiwi": 32,
+            "mango": 14,
+            "banana": 4,
+            "dragonfruit": 6
+          }
+        }
+      },
+      "referenceArtifactSha256": "78d78a973dc9670fd27a65bb52fac946960f58024fa1b9212c6dcde9fbeca2f4",
+      "protocolHash": "c3eb51bb072ab91a43b0e0441b6a6b827f8c1e1fed4e8ab469f8c1a608d5a2e9"
+    },
+    {
+      "baseline": {
+        "modelId": "z-ai/glm-5.3-flash",
+        "capturedAt": "2026-11-01T09:36:03.277Z",
+        "sampleCount": 540,
+        "probes": {
+          "day": {
+            "sunday": 22,
+            "wednesday": 25,
+            "friday": 8,
+            "monday": 2,
+            "saturday": 3
+          },
+          "rand_dwarf": {
+            "doc": 36,
+            "grumpy": 19,
+            "happy": 5
+          },
+          "rand_gem": {
+            "diamond": 58,
+            "sapphire": 2
+          },
+          "rand_month": {
+            "march": 9,
+            "october": 15,
+            "november": 35,
+            "april": 1
+          },
+          "rand_city": {
+            "kyoto": 58,
+            "lisbon": 2
+          },
+          "rand_bird": {
+            "penguin": 24,
+            "falcon": 26,
+            "robin": 10
+          },
+          "rand_element": {
+            "gold": 59,
+            "tungsten": 1
+          },
+          "rand_bignum": {
+            "347": 10,
+            "417": 1,
+            "437": 1,
+            "473": 4,
+            "483": 1,
+            "527": 2,
+            "537": 2,
+            "617": 6,
+            "727": 21,
+            "737": 9,
+            "738": 1,
+            "742": 1,
+            "743": 1
+          },
+          "rand_fruit": {
+            "mango": 60
+          }
+        }
+      },
+      "referenceArtifactSha256": "f0b5cf89e554cb36dd755f7b21fe03a352553877528001e4f362c89e3a4ed80c",
+      "protocolHash": "c3eb51bb072ab91a43b0e0441b6a6b827f8c1e1fed4e8ab469f8c1a608d5a2e9"
+    }
+  ]
+}

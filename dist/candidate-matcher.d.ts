@@ -31,10 +31,9 @@ export declare function deriveVerdictFromClaimedModel(candidates: IdentityCandid
     predictedFamily: string | undefined;
 };
 /**
- * Original-page verdict: even when the exact sub-model can't be confirmed, a
- * claimed family that appears among the candidates resolves to
- * "clean_match_family_only" instead of a flat mismatch. This matches the
- * official-page behavior for e.g. brand-new GLM Flash releases.
+ * Family-only heuristic assessment. Supporting claimed-family evidence can
+ * establish consistency despite overlapping styles; a weak or absent signal
+ * cannot. This classifier never claims exact-model verification.
  */
 export declare function deriveFamilyVerdict(candidates: IdentityCandidate[], claimedFamily: string | undefined): FamilyVerdict;
 //# sourceMappingURL=candidate-matcher.d.ts.map

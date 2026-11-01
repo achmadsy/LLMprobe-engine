@@ -9,10 +9,11 @@
     "bazaarlink-probe": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/glm53-bias-reference-pack.json', 'dist/glm53-bias-reference-pack.json')\"",
     "dev": "ts-node src/cli.ts",
     "sidecar": "ts-node src/sidecar-cli.ts",
     "start:sidecar": "node dist/sidecar-cli.js",
+    "calibrate:bias": "node dist/bias-calibration-cli.js",
     "test": "vitest run --passWithNoTests"
   },
   "engines": {

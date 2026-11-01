@@ -37,6 +37,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const commander_1 = require("commander");
 const runner_js_1 = require("./runner.js");
+const glm_distribution_models_js_1 = require("./glm-distribution-models.js");
 const canary_runner_js_1 = require("./canary-runner.js");
 const probe_suite_js_1 = require("./probe-suite.js");
 const proxy_server_js_1 = require("./proxy-server.js");
@@ -158,6 +159,8 @@ program
         if (!baseline && judge)
             console.error(`  Baseline : none — llm_judge probes will return null`);
         console.error(`  Timeout  : ${timeoutMs}ms per probe\n`);
+        if ((0, glm_distribution_models_js_1.supportsGlmDistribution)(opts.model))
+            console.error("  GLM recheck: automatically adds up to 51 sequential target calls; produces a provisional five-reference estimate.");
     }
     if (!opts.quiet && opts.claimedModel) {
         console.error(`  Claimed  : ${opts.claimedModel}`);
@@ -171,6 +174,10 @@ program
         judge,
         baseline,
         claimedModel: opts.claimedModel,
+        onDistributionProgress: ({ attempts, failures, total }) => {
+            if (!opts.quiet)
+                console.error(`  GLM recheck: ${attempts}/${total} attempts, ${failures} failed`);
+        },
         onProgress: (result, index, total) => {
             if (!opts.quiet) {
                 const ic = icon(result);

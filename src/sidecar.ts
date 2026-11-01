@@ -4,6 +4,8 @@
 import * as http from "http";
 import { randomUUID } from "crypto";
 import { runProbes, type RunOptions, type RunReport, type ProbeResult } from "./runner.js";
+import { validateDistributionEvidence } from "./distribution-evidence.js";
+import { supportsGlmDistribution } from "./glm-distribution-models.js";
 import { combineSignals, createSafeFetch, validateUrl, type EgressOptions, EgressError } from "./egress-guard.js";
 import { normalizeCustomHeaders, customHeaderSecrets, mergeCustomHeaders, CustomHeadersError } from "./custom-headers.js";
 import { redactSecrets, truncateString, boundError, sanitizeProbeResult, sanitizeReport } from "./redaction.js";
@@ -128,7 +130,7 @@ export class SidecarServer {
         status: "ok",
         service: "bazaarlink-probe-engine-sidecar",
         version: SIDECAR_VERSION,
-        capabilities: ["saved-result-replay"],
+        capabilities: ["saved-result-replay", "glm-distribution-v1"],
         license: SIDECAR_LICENSE,
         source: SIDECAR_SOURCE,
         activeRun: this.getActiveRun(),
@@ -369,6 +371,18 @@ export class SidecarServer {
     }
 
     const operation = body.operation;
+    try {
+      if (body.distributionSampling && (body.distributionSampling.enabled !== true || body.distributionSampling.maxCalls !== 51 ||
+          !supportsGlmDistribution(body.modelId))) throw new Error("Invalid sampling configuration");
+      if (body.savedDistributionEvidence) {
+        if (!operation) throw new Error("Saved evidence requires replay");
+        body.savedDistributionEvidence = validateDistributionEvidence(body.savedDistributionEvidence);
+      }
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid distribution sampling or saved evidence", code: "bad_request" } }));
+      return;
+    }
     if (operation !== undefined) {
       const allowedIds = new Set<string>(ORIGINAL_SUITE_IDS);
       const rows = body.previousResults;
@@ -460,6 +474,7 @@ export class SidecarServer {
         judge: body.judge ? { ...body.judge, customHeaders: judgeCustomHeaders } : undefined,
         signal: abortController.signal,
         egressOptions: egressOpts,
+        onDistributionProgress: (progress) => sendSse("distribution", { runId, ...progress }),
         onProgress: (result: ProbeResult, index: number, total: number) => {
           sendSse("progress", {
             runId,

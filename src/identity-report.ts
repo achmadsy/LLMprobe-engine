@@ -26,6 +26,9 @@ export interface SubModelMatch {
 }
 
 export interface IdentityAssessment {
+  /** Offline advanced stages, including explicitly qualified provisional model estimates. */
+  advanced?: import("./advanced-identity.js").AdvancedIdentityAssessment;
+  distributionEvidence?: import("./distribution-evidence.js").DistributionEvidence;
   status: IdentityStatus;
   confidence: number;
   claimedModel: string | undefined;
@@ -102,6 +105,9 @@ export interface IdentityAssessment {
   verdict?: {
     status:
       | "clean_match"
+      | "likely_match"
+      | "likely_submodel_mismatch"
+      | "model_estimate"
       | "clean_match_family_only"
       | "clean_match_submodel_mismatch"
       | "plain_mismatch"

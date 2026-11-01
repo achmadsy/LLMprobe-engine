@@ -35,6 +35,18 @@ const gptFeatures = {
     });
 });
 (0, vitest_1.describe)("deriveVerdict", () => {
+    (0, vitest_1.it)("preserves supporting same-family evidence without claiming exact identity", () => {
+        const candidates = [
+            { model: "Anthropic / Claude", family: "anthropic", score: 1, reasons: [] },
+            { model: "Zhipu AI / GLM", family: "zhipu", score: 0.94, reasons: [] },
+        ];
+        (0, vitest_1.expect)((0, candidate_matcher_js_1.deriveVerdict)(candidates, "zhipu").status).toBe("match");
+        (0, vitest_1.expect)((0, candidate_matcher_js_1.deriveFamilyVerdict)(candidates, "zhipu")).toMatchObject({ status: "clean_match_family_only", trueFamily: "zhipu", confidence: "medium" });
+    });
+    (0, vitest_1.it)("does not promote family-only heuristics to exact-model verification", () => {
+        const candidates = [{ model: "GLM", family: "zhipu", score: 1, reasons: [] }];
+        (0, vitest_1.expect)((0, candidate_matcher_js_1.deriveFamilyVerdict)(candidates, "zhipu").status).toBe("clean_match_family_only");
+    });
     (0, vitest_1.it)("returns match when top candidate matches claimed family with high confidence", () => {
         const candidates = (0, candidate_matcher_js_1.matchCandidates)(claudeFeatures);
         const verdict = (0, candidate_matcher_js_1.deriveVerdict)(candidates, "anthropic");

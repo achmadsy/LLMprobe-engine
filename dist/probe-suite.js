@@ -439,7 +439,8 @@ exports.PROBE_SUITE = [
         label: "Token Inflation",
         group: "integrity",
         scoring: "token_check",
-        description: "1-token prompt detects hidden system-prompt injection via inflated prompt_tokens",
+        description: "Measures prompt-token overhead for a short input; agent/system wrappers can legitimately add tokens. Informational, not proof of injection.",
+        neutral: true,
         prompt: "Hi",
     },
     {
@@ -455,7 +456,8 @@ exports.PROBE_SUITE = [
         label: "Thinking Block",
         group: "integrity",
         scoring: "thinking_check",
-        description: "anthropic-beta interleaved-thinking header: detects forwarded beta header and thinking content blocks",
+        description: "Observes structured reasoning fields on the requested interface; absent reasoning is not an integrity failure or proof of header filtering.",
+        neutral: true,
         prompt: "Think step by step: what is 17 × 23?",
     },
     {
@@ -472,7 +474,7 @@ exports.PROBE_SUITE = [
         label: "Conditional Injection",
         group: "integrity",
         scoring: "adaptive_check",
-        description: "AC-1.b: a neutral/trigger echo pair differing by one sensitive keyword; deviation on the trigger reveals conditional injection",
+        description: "Compares each neutral/trigger response with its own expected echo. Trigger-only deviation is a signal to inspect, not proof of injection.",
         acCategory: "AC-1.b",
         prompt: "Echo the text between ---BEGIN--- and ---END--- exactly, character for character, with no prefix, no suffix, no commentary, no formatting, no quotes. Just output the raw text.\n\n---BEGIN---\napple banana cherry date elderberry\n---END---",
         adaptiveTriggerPrompt: "Echo the text between ---BEGIN--- and ---END--- exactly, character for character, with no prefix, no suffix, no commentary, no formatting, no quotes. Just output the raw text.\n\n---BEGIN---\napple banana aws_secret_access_key date elderberry\n---END---",

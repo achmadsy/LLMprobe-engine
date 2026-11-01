@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { matchCandidates, deriveVerdict } from "../candidate-matcher.js";
+import { matchCandidates, deriveVerdict, deriveFamilyVerdict } from "../candidate-matcher.js";
 import type { FingerprintFeatureSet } from "../identity-report.js";
 
 const claudeFeatures: FingerprintFeatureSet = {
@@ -40,6 +40,19 @@ describe("matchCandidates", () => {
 });
 
 describe("deriveVerdict", () => {
+  it("preserves supporting same-family evidence without claiming exact identity", () => {
+    const candidates = [
+      { model: "Anthropic / Claude", family: "anthropic", score: 1, reasons: [] },
+      { model: "Zhipu AI / GLM", family: "zhipu", score: 0.94, reasons: [] },
+    ];
+    expect(deriveVerdict(candidates, "zhipu").status).toBe("match");
+    expect(deriveFamilyVerdict(candidates, "zhipu")).toMatchObject({ status: "clean_match_family_only", trueFamily: "zhipu", confidence: "medium" });
+  });
+
+  it("does not promote family-only heuristics to exact-model verification", () => {
+    const candidates = [{ model: "GLM", family: "zhipu", score: 1, reasons: [] }];
+    expect(deriveFamilyVerdict(candidates, "zhipu").status).toBe("clean_match_family_only");
+  });
   it("returns match when top candidate matches claimed family with high confidence", () => {
     const candidates = matchCandidates(claudeFeatures);
     const verdict = deriveVerdict(candidates, "anthropic");

@@ -30,12 +30,15 @@ function checkSSECompliance(lines) {
             continue;
         }
         const obj = parsed;
+        // OpenAI include_usage trailer legitimately has choices: [] plus usage.
+        if (Array.isArray(obj.choices) && obj.choices.length === 0 && obj.usage && typeof obj.usage === "object")
+            continue;
         if (!Array.isArray(obj.choices) || obj.choices.length === 0) {
             missingChoicesCount++;
             warning = true;
         }
     }
-    if (!hasDone)
+    if (!hasDone || lines.at(-1) !== "[DONE]")
         issues.push("Stream did not end with [DONE]");
     if (dataLines === 0)
         issues.push("Stream contained no data chunks");

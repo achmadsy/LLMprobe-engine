@@ -27,6 +27,9 @@ export interface SubModelMatch {
     abstainReason?: string;
 }
 export interface IdentityAssessment {
+    /** Offline advanced stages, including explicitly qualified provisional model estimates. */
+    advanced?: import("./advanced-identity.js").AdvancedIdentityAssessment;
+    distributionEvidence?: import("./distribution-evidence.js").DistributionEvidence;
     status: IdentityStatus;
     confidence: number;
     claimedModel: string | undefined;
@@ -124,7 +127,7 @@ export interface IdentityAssessment {
      * fingerprints against claimedFamily. Absent on legacy runs.
      */
     verdict?: {
-        status: "clean_match" | "clean_match_family_only" | "clean_match_submodel_mismatch" | "plain_mismatch" | "spoof_behavior_induced" | "spoof_selfclaim_forged" | "ambiguous" | "insufficient_data";
+        status: "clean_match" | "likely_match" | "likely_submodel_mismatch" | "model_estimate" | "clean_match_family_only" | "clean_match_submodel_mismatch" | "plain_mismatch" | "spoof_behavior_induced" | "spoof_selfclaim_forged" | "ambiguous" | "insufficient_data";
         trueFamily: string | null;
         trueModel: string | null;
         spoofMethod: "behavior_induced" | "selfclaim_forged" | null;

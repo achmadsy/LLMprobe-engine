@@ -32,28 +32,33 @@ export function matchCandidates(features: FingerprintFeatureSet): IdentityCandid
       const cat = features[category] as Record<string, number> | undefined;
       const value = cat?.[key] ?? 0;
       if (value === 0) continue;
-      raw += weight * value;
+      const wrapperSensitive = ["lexical", "reasoning", "listFormat", "refusal", "textStructure"].includes(category);
+      const effectiveWeight = features.selfClaim?.agent_wrapper && wrapperSensitive ? weight * 0.1 : weight;
+      raw += effectiveWeight * value;
       if (weight > 0) {
-        reasons.push(`${key.replace(/_/g, " ")} detected (+${weight.toFixed(1)})`);
+        reasons.push(`${key.replace(/_/g, " ")} detected (+${effectiveWeight.toFixed(1)})`);
       } else {
-        reasons.push(`${key.replace(/_/g, " ")} contradicts ${baseline.family} (${weight.toFixed(1)})`);
+        reasons.push(`${key.replace(/_/g, " ")} contradicts ${baseline.family} (${effectiveWeight.toFixed(1)})`);
       }
     }
 
     rawScores.push({ family: baseline.family, displayName: baseline.displayName, raw, reasons });
   }
 
-  const maxRaw = Math.max(...rawScores.map(s => s.raw), 1);
+  // Saturating evidence strength, not winner-relative normalization: a weak
+  // winner must not automatically become 100%. This remains a heuristic, not
+  // a calibrated probability. Five weight units provide a fixed reference.
+  const evidenceReference = 5;
   return rawScores
     .filter(s => s.raw > 0)
-    .sort((a, b) => b.raw - a.raw)
-    .slice(0, 3)
     .map(s => ({
       model: s.displayName,
       family: s.family,
-      score: Math.min(1, Math.max(0, s.raw / maxRaw)),
+      score: s.raw / (s.raw + evidenceReference),
       reasons: s.reasons.slice(0, 5),
-    }));
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
 }
 
 /**
@@ -72,14 +77,27 @@ export function deriveVerdict(
 
   const top = candidates[0];
   const evidence = top.reasons.slice(0, 3);
+  const secondScore = candidates[1]?.score ?? 0;
+  const margin = top.score - secondScore;
+  // Scores are relative heuristic similarity, not calibrated probabilities.
+  // Close competing families must abstain even when the top normalizes to 1.
+  const claimed = candidates.find(candidate => candidate.family === claimedFamily);
+  if (claimed && claimed.score >= 0.2 && top.score - claimed.score <= 0.15) {
+    return { status: "match", confidence: Math.min(0.65, claimed.score), evidence: [
+      "Evidence supports the claimed family; exact-model identity is not verified", ...claimed.reasons.slice(0, 3),
+    ] };
+  }
+  if (candidates.length > 1 && margin < 0.15) {
+    return { status: "uncertain", confidence: Math.max(0, margin), evidence: [
+      `Competing family signals are too close (relative score gap ${margin.toFixed(2)}); identity is unconfirmed`, ...evidence,
+    ] };
+  }
 
   if (!claimedFamily) {
     return { status: "uncertain", confidence: top.score * 0.7, evidence };
   }
 
   if (top.family === claimedFamily && top.score > 0.5) {
-    const secondScore = candidates[1]?.score ?? 0;
-    const margin = top.score - secondScore;
     const confidence = Math.min(1, top.score * (0.6 + margin * 0.4));
     return { status: "match", confidence, evidence };
   }
@@ -90,7 +108,9 @@ export function deriveVerdict(
       confidence: top.score,
       evidence: [
         `Behavior most consistent with ${top.model} (score: ${top.score.toFixed(2)})`,
-        `Claimed family ${claimedFamily} not in top candidates`,
+        candidates.some(candidate => candidate.family === claimedFamily)
+          ? `Claimed family ${claimedFamily} ranks below the leading family`
+          : `Claimed family ${claimedFamily} not in top candidates`,
         ...evidence,
       ],
     };
@@ -106,7 +126,7 @@ export function deriveVerdictFromClaimedModel(
 ): { status: IdentityStatus; confidence: number; evidence: string[]; predictedFamily: string | undefined } {
   const claimedFamily = claimedModel ? claimedModelToFamily(claimedModel) : undefined;
   const verdict = deriveVerdict(candidates, claimedFamily);
-  return { ...verdict, predictedFamily: candidates[0]?.family };
+  return { ...verdict, predictedFamily: verdict.status === "match" ? claimedFamily : verdict.status === "uncertain" ? undefined : candidates[0]?.family };
 }
 
 function confidenceBand(score: number): ConfidenceBand {
@@ -114,10 +134,9 @@ function confidenceBand(score: number): ConfidenceBand {
 }
 
 /**
- * Original-page verdict: even when the exact sub-model can't be confirmed, a
- * claimed family that appears among the candidates resolves to
- * "clean_match_family_only" instead of a flat mismatch. This matches the
- * official-page behavior for e.g. brand-new GLM Flash releases.
+ * Family-only heuristic assessment. Supporting claimed-family evidence can
+ * establish consistency despite overlapping styles; a weak or absent signal
+ * cannot. This classifier never claims exact-model verification.
  */
 export function deriveFamilyVerdict(
   candidates: IdentityCandidate[],
@@ -134,26 +153,34 @@ export function deriveFamilyVerdict(
     ? candidates.find(c => c.family === claimedFamily)
     : undefined;
 
-  if (claimed && top.family === claimedFamily && top.score > 0.5) {
+  const gap = top.score - (candidates[1]?.score ?? 0);
+  if (claimed && claimed.score >= 0.2 && top.score - claimed.score <= 0.15) {
     return {
-      status: "clean_match",
-      trueFamily: claimedFamily,
-      confidence: confidenceBand(top.score),
+      status: "clean_match_family_only", trueFamily: claimedFamily ?? null,
+      confidence: "medium",
+      reasoning: ["The claimed family has supporting behavioral evidence; shared styles can overlap across families. Exact-model identity is unconfirmed."],
+    };
+  }
+  if (!claimedFamily || (candidates.length > 1 && gap < 0.15)) {
+    return {
+      status: "ambiguous", trueFamily: null, confidence: "low",
       reasoning: [
-        `Behavior most consistent with ${top.model} (score: ${top.score.toFixed(2)})`,
-        ...top.reasons.slice(0, 3),
+        claimedFamily
+          ? `Competing family signals are too close to confirm ${claimedFamily} (relative score gap ${gap.toFixed(2)})`
+          : "No claimed family supplied; behavioral similarity alone does not verify identity",
+        `Relative heuristic scores (not probabilities): ${candidates.map(c => `${c.model} ${Math.round(c.score * 100)}/100`).join("; ")}`,
       ],
     };
   }
 
-  if (claimed && claimed.score >= 0.2) {
+  if (claimed && top.family === claimedFamily && top.score > 0.5) {
     return {
       status: "clean_match_family_only",
-      trueFamily: claimedFamily ?? null,
-      confidence: confidenceBand(claimed.score),
+      trueFamily: claimedFamily,
+      confidence: confidenceBand(top.score),
       reasoning: [
-        `Evidence leans toward ${top.model} (${Math.round(top.score * 100)}%) rather than the claimed ${claimed.model} (${Math.round(claimed.score * 100)}%), but the claimed family is present — same family, exact model unconfirmed`,
-        `Likelihood gap ${Math.abs(top.score - claimed.score).toFixed(2)}; per-signal vote: ${candidates.map(c => `${c.model} ${Math.round(c.score * 100)}%`).join(" : ")}`,
+        `Behavior is most consistent with the claimed ${top.model} family; the exact model is not verified`,
+        ...top.reasons.slice(0, 3),
       ],
     };
   }
@@ -166,7 +193,7 @@ export function deriveFamilyVerdict(
       reasoning: [
         `Behavior most consistent with ${top.model} (score: ${top.score.toFixed(2)})`,
         claimedFamily
-          ? `Claimed family ${claimedFamily} not among candidates`
+          ? claimed ? `Claimed family ${claimedFamily} ranks below the leading family` : `Claimed family ${claimedFamily} not among candidates`
           : "No claimed family supplied",
         ...top.reasons.slice(0, 2),
       ],

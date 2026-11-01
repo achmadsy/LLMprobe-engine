@@ -8,6 +8,7 @@ const probe_score_js_1 = require("./probe-score.js");
 const probe_preflight_js_1 = require("./probe-preflight.js");
 const token_inflation_js_1 = require("./token-inflation.js");
 const sse_compliance_js_1 = require("./sse-compliance.js");
+const probe_wire_js_1 = require("./probe-wire.js");
 const context_check_js_1 = require("./context-check.js");
 const fingerprint_extractor_js_1 = require("./fingerprint-extractor.js");
 const candidate_matcher_js_1 = require("./candidate-matcher.js");
@@ -17,6 +18,10 @@ const signature_probe_js_1 = require("./signature-probe.js");
 const fingerprint_judge_js_1 = require("./fingerprint-judge.js");
 const fingerprint_vectors_js_1 = require("./fingerprint-vectors.js");
 const fingerprint_fusion_js_1 = require("./fingerprint-fusion.js");
+const advanced_identity_js_1 = require("./advanced-identity.js");
+const distribution_evidence_js_1 = require("./distribution-evidence.js");
+const glm_distribution_models_js_1 = require("./glm-distribution-models.js");
+const original_suite_js_1 = require("./original-suite.js");
 const egress_guard_js_1 = require("./egress-guard.js");
 const retry_fetch_js_1 = require("./retry-fetch.js");
 const custom_headers_js_1 = require("./custom-headers.js");
@@ -174,11 +179,20 @@ async function runProbes(options) {
         if (options.embeddingEndpoint?.baseUrl)
             (0, egress_guard_js_1.validateUrl)(options.embeddingEndpoint.baseUrl, options.egressOptions);
     }
-    const fetchImpl = (0, retry_fetch_js_1.createRetryingFetch)(options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch), { retries: options.requestRetries ?? 2, signal: options.signal });
+    const rawFetch = options.fetchFn ?? (options.egressOptions ? (0, egress_guard_js_1.createSafeFetch)(options.egressOptions) : fetch);
+    const fetchImpl = (0, retry_fetch_js_1.createRetryingFetch)(rawFetch, { retries: options.requestRetries ?? 2, signal: options.signal });
     const outerSignal = options.signal;
     const targetSecrets = [apiKey, ...(0, custom_headers_js_1.customHeaderSecrets)(customHeaders)];
     const chatUrl = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
     const startedAt = new Date().toISOString();
+    if (options.distributionSampling && (options.distributionSampling.enabled !== true || options.distributionSampling.maxCalls !== 51 ||
+        !(0, glm_distribution_models_js_1.supportsGlmDistribution)(modelId)))
+        throw new Error("Invalid distribution sampling configuration");
+    let distributionEvidence = options.savedDistributionEvidence ? (0, distribution_evidence_js_1.validateDistributionEvidence)(options.savedDistributionEvidence) : undefined;
+    if (distributionEvidence && !options.operation)
+        throw new Error("Saved distribution evidence is only accepted for replay");
+    if (distributionEvidence && distributionEvidence.modelId !== modelId)
+        throw new Error("Saved distribution evidence belongs to a different target model");
     let selectedSuite = probe_suite_js_1.PROBE_SUITE;
     if (options.probeIds !== undefined) {
         if (!Array.isArray(options.probeIds) || options.probeIds.length === 0 || options.probeIds.length > probe_suite_js_1.PROBE_SUITE.length) {
@@ -319,6 +333,7 @@ async function runProbes(options) {
                 continue;
             }
             const t0 = Date.now();
+            const pairErrors = [];
             const makeRequest = async (prompt) => {
                 try {
                     const acHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
@@ -326,14 +341,16 @@ async function runProbes(options) {
                     const r = await fetchImpl(chatUrl, {
                         method: "POST",
                         headers: acHeaders,
+                        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: prompt }], stream: false, max_tokens: 256, temperature: 0 }),
                         signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
                     if (!r.ok)
-                        return null;
+                        throw new Error(`HTTP ${r.status}: ${await (0, signature_probe_js_1.readBoundedResponse)(r, 4096)}`);
                     const d = await readBoundedJson(r);
                     return (d.choices?.[0]?.message?.content ?? "").trim();
                 }
-                catch {
+                catch (error) {
+                    pairErrors.push((0, redaction_js_1.boundError)(error, 300, targetSecrets));
                     return null;
                 }
             };
@@ -344,19 +361,23 @@ async function runProbes(options) {
             const dur = Date.now() - t0;
             if (!neutralResp || !triggerResp) {
                 result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                    status: "done", passed: "warning", passReason: "One or both requests failed — cannot assess",
+                    status: "error", passed: null, passReason: "One or both requests failed — not assessed",
                     ttftMs: null, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
-                    response: `neutral: ${neutralResp?.slice(0, 100) ?? "ERROR"} | trigger: ${triggerResp?.slice(0, 100) ?? "ERROR"}`, error: null };
+                    response: `neutral: ${neutralResp?.slice(0, 100) ?? "ERROR"} | trigger: ${triggerResp?.slice(0, 100) ?? "ERROR"}`, error: pairErrors.join("; ") || "Empty paired response" };
             }
             else {
-                const identical = neutralResp === triggerResp;
+                const neutralMatches = neutralResp === (0, probe_wire_js_1.expectedEcho)(probe.prompt);
+                const triggerMatches = triggerResp === (0, probe_wire_js_1.expectedEcho)(probe.adaptiveTriggerPrompt);
+                const passed = neutralMatches && triggerMatches;
                 result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
                     status: "done", ttftMs: null, durationMs: dur, inputTokens: null, outputTokens: null, tps: null,
                     response: `neutral: ${neutralResp.slice(0, 100)} | trigger: ${triggerResp.slice(0, 100)}`,
-                    passed: identical ? true : false,
-                    passReason: identical
-                        ? "Both requests returned identical content — no conditional injection detected"
-                        : `Responses diverge — possible conditional injection: neutral="${neutralResp.slice(0, 60)}" trigger="${triggerResp.slice(0, 60)}"`,
+                    passed: passed ? true : "warning",
+                    passReason: passed
+                        ? "Both responses match their own expected echoes — no conditional deviation observed"
+                        : neutralMatches && !triggerMatches
+                            ? "Neutral echo matched but trigger echo deviated — possible conditional behavior, not proof of injection"
+                            : "Echo instructions were not followed consistently — conditional injection not established",
                     error: null };
             }
             results.push(result);
@@ -367,18 +388,23 @@ async function runProbes(options) {
         if (probe.scoring === "thinking_check") {
             const t0 = Date.now();
             try {
-                const tcHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "anthropic-beta": "interleaved-thinking-2025-05-14" };
+                const tcHeaders = { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" };
                 (0, custom_headers_js_1.mergeCustomHeaders)(tcHeaders, customHeaders);
                 const r = await fetchImpl(chatUrl, {
                     method: "POST",
                     headers: tcHeaders,
-                    body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, max_tokens: 2048, thinking: { type: "enabled", budget_tokens: 1024 } }),
+                    body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: true, stream_options: { include_usage: true }, max_tokens: 2048, reasoning_effort: "high" }),
                     signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                 });
                 const dur = Date.now() - t0;
                 if (!r.ok) {
-                    result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                        status: "done", passed: "warning", passReason: `HTTP ${r.status} — provider may not support thinking or beta header`, ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null, response: null, error: null };
+                    const unsupported = [400, 415, 422].includes(r.status);
+                    const detail = (0, redaction_js_1.boundError)(await (0, signature_probe_js_1.readBoundedResponse)(r, 4096), 300, targetSecrets);
+                    result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: true,
+                        status: unsupported ? "skipped" : "error", passed: null,
+                        passReason: `HTTP ${r.status} — reasoning visibility was not assessed on this interface`,
+                        ttftMs: dur, durationMs: dur, inputTokens: null, outputTokens: null, tps: null, response: null,
+                        error: `HTTP ${r.status}: ${detail}` };
                 }
                 else {
                     let hasThinking = false;
@@ -386,52 +412,29 @@ async function runProbes(options) {
                     let ttft = null;
                     let inTok = null;
                     let outTok = null;
-                    if (r.body) {
-                        const rd = r.body.getReader();
-                        const dc = new TextDecoder();
-                        let buf = "";
-                        while (true) {
-                            if (outerSignal?.aborted) {
-                                await rd.cancel().catch(() => { });
-                                break;
-                            }
-                            const { done, value } = await rd.read();
-                            if (done)
-                                break;
-                            if (ttft === null)
-                                ttft = Date.now() - t0;
-                            buf += dc.decode(value, { stream: true });
-                            const ls = buf.split("\n");
-                            buf = ls.pop() ?? "";
-                            for (const l of ls) {
-                                if (!l.startsWith("data: "))
-                                    continue;
-                                const p2 = l.slice(6).trim();
-                                if (p2 === "[DONE]")
-                                    continue;
-                                try {
-                                    const j = JSON.parse(p2);
-                                    const delta = j.choices?.[0]?.delta;
-                                    if (delta?.content)
-                                        fullT += delta.content;
-                                    if (j.type === "content_block_start")
-                                        hasThinking = true;
-                                    if (delta?.type === "thinking")
-                                        hasThinking = true;
-                                    const usage = j.usage;
-                                    if (usage) {
-                                        inTok = usage.prompt_tokens ?? null;
-                                        outTok = usage.completion_tokens ?? null;
-                                    }
-                                }
-                                catch { /* ignore */ }
+                    const payloads = await (0, probe_wire_js_1.readProbeStream)(r, outerSignal, () => { ttft = Date.now() - t0; });
+                    for (const payload of payloads) {
+                        if (payload === "[DONE]")
+                            continue;
+                        try {
+                            const j = JSON.parse(payload);
+                            const delta = j.choices?.[0]?.delta;
+                            if (delta?.content)
+                                fullT += delta.content;
+                            if (delta?.reasoning_content || delta?.reasoning || delta?.type === "thinking"
+                                || j.content_block?.type === "thinking" || j.delta?.type === "thinking_delta")
+                                hasThinking = true;
+                            if (j.usage) {
+                                inTok = j.usage.prompt_tokens ?? null;
+                                outTok = j.usage.completion_tokens ?? null;
                             }
                         }
+                        catch { /* malformed payload is evaluated by the SSE-specific check */ }
                     }
                     const durationMs = Date.now() - t0;
                     result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                        status: "done", passed: hasThinking ? true : "warning",
-                        passReason: hasThinking ? "Thinking content block detected — provider forwards beta header" : "Response OK but no thinking block — provider may not forward anthropic-beta header",
+                        status: "done", passed: null,
+                        passReason: hasThinking ? "Structured reasoning observed on this interface; this does not prove header forwarding" : "No structured reasoning exposed on this interface; this may be expected and is not an integrity failure",
                         ttftMs: ttft ?? durationMs, durationMs, inputTokens: inTok, outputTokens: outTok, tps: null, response: fullT.slice(0, 1000), error: null };
                 }
             }
@@ -447,6 +450,7 @@ async function runProbes(options) {
         if (probe.scoring === "consistency_check") {
             const t0 = Date.now();
             const responses = [];
+            const pairErrors = [];
             let inTok = null;
             let outTok = null;
             for (let i = 0; i < 2; i++) {
@@ -458,12 +462,11 @@ async function runProbes(options) {
                     const r = await fetchImpl(chatUrl, {
                         method: "POST",
                         headers: ccHeaders,
+                        body: JSON.stringify({ model: modelId, messages: [{ role: "user", content: probe.prompt }], stream: false, max_tokens: 256, temperature: 0.7 }),
                         signal: (0, egress_guard_js_1.combineSignals)(timeoutMs, outerSignal),
                     });
-                    if (!r.ok) {
-                        responses.push("__ERROR__");
-                        continue;
-                    }
+                    if (!r.ok)
+                        throw new Error(`HTTP ${r.status}: ${await (0, signature_probe_js_1.readBoundedResponse)(r, 4096)}`);
                     const d = await readBoundedJson(r);
                     responses.push((d.choices?.[0]?.message?.content ?? "").trim());
                     if (i === 0) {
@@ -471,19 +474,20 @@ async function runProbes(options) {
                         outTok = d.usage?.completion_tokens ?? null;
                     }
                 }
-                catch {
-                    responses.push("__EXCEPTION__");
+                catch (error) {
+                    pairErrors.push((0, redaction_js_1.boundError)(error, 300, targetSecrets));
+                    responses.push("__ERROR__");
                 }
             }
-            const ok = responses.length === 2 && !responses.includes("__ERROR__") && !responses.includes("__EXCEPTION__");
+            const ok = responses.length === 2 && responses.every(text => text.length > 0 && text !== "__ERROR__");
             const identical = ok && responses[0] === responses[1];
             result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                status: "done", durationMs: Date.now() - t0, inputTokens: inTok, outputTokens: outTok,
-                response: responses.join(" | "), ttftMs: null, tps: null, error: null,
-                passed: !ok ? "warning" : identical ? "warning" : true,
+                status: ok ? "done" : "error", durationMs: Date.now() - t0, inputTokens: inTok, outputTokens: outTok,
+                response: responses.join(" | "), ttftMs: null, tps: null, error: ok ? null : pairErrors.join("; ") || "Empty paired response",
+                passed: !ok ? null : identical ? "warning" : true,
                 passReason: !ok ? "One or more requests failed — cannot assess consistency"
                     : identical ? `Both responses identical (${responses[0]?.slice(0, 30)}) — possible cache hit`
-                        : "Responses differ — confirms independent generation" };
+                        : "Responses differ — no identical-output signal observed (not proof of cache absence)" };
             results.push(result);
             onProgress?.(result, idx, probes.length);
             continue;
@@ -689,9 +693,11 @@ async function runProbes(options) {
                     ];
                 }
                 else {
-                    // pdf — send as a text block with a data URI annotation; not all providers support native PDF
+                    // OpenAI file content part, translated to a native document block by
+                    // compatible gateways. Send the entire fixture, never a base64 excerpt.
                     userContent = [
-                        { type: "text", text: `[Attached document (${mc.mediaType}), base64: data:${mc.mediaType};base64,${mc.dataB64.slice(0, 64)}…]\n\n${effectivePrompt}` },
+                        { type: "file", file: { filename: "probe.pdf", file_data: `data:${mc.mediaType};base64,${mc.dataB64}` } },
+                        { type: "text", text: effectivePrompt },
                     ];
                 }
             }
@@ -728,9 +734,13 @@ async function runProbes(options) {
             if (!res.ok) {
                 // 64 KiB bound on the error body so a hostile upstream can't flood memory.
                 const errText = await (0, signature_probe_js_1.readBoundedResponse)(res, 64 * 1024).catch(() => "");
-                result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
-                    status: "error", passed: null, passReason: null, ttftMs: null, durationMs: Date.now() - startTime,
-                    inputTokens: null, outputTokens: null, tps: null, response: null, error: `HTTP ${res.status}: ${errText.slice(0, 200)}` };
+                const unsupportedDocument = probe.id === "multimodal_pdf" && [400, 415, 422].includes(res.status)
+                    && /(?:unsupported|not support|not supported|invalid).{0,80}(?:pdf|document|file)|(?:pdf|document|file).{0,80}(?:unsupported|not support|not supported)/i.test(errText);
+                result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: unsupportedDocument || (probe.neutral ?? false),
+                    status: unsupportedDocument ? "skipped" : "error", passed: null,
+                    passReason: unsupportedDocument ? "PDF input is unsupported on this endpoint — not assessed" : null,
+                    ttftMs: null, durationMs: Date.now() - startTime,
+                    inputTokens: null, outputTokens: null, tps: null, response: null, error: `HTTP ${res.status}: ${(0, redaction_js_1.boundError)(errText, 200, targetSecrets)}` };
                 results.push(result);
                 onProgress?.(result, idx, probes.length);
                 continue;
@@ -738,45 +748,24 @@ async function runProbes(options) {
             // Capture response headers
             res.headers.forEach((val, key) => { responseHeaders[key.toLowerCase()] = val; });
             if (useStream && res.body) {
-                const reader = res.body.getReader();
-                const decoder = new TextDecoder();
-                let buf = "";
-                let streamBytes = 0;
-                while (true) {
-                    if (outerSignal?.aborted) {
-                        await reader.cancel().catch(() => { });
-                        break;
-                    }
-                    const { done, value } = await reader.read();
-                    if (done)
-                        break;
-                    if (ttftMs === null)
-                        ttftMs = Date.now() - startTime;
-                    streamBytes += value.byteLength;
-                    if (streamBytes > MAX_STREAM_RESPONSE_BYTES) {
-                        await reader.cancel("Response stream too large").catch(() => { });
-                        throw new Error(`Probe response stream too large (max ${MAX_STREAM_RESPONSE_BYTES} bytes)`);
-                    }
-                    buf += decoder.decode(value, { stream: true });
-                    const lines = buf.split("\n");
-                    buf = lines.pop() ?? "";
-                    for (const line of lines) {
-                        if (!line.startsWith("data: "))
-                            continue;
-                        const payload = line.slice(6).trim();
-                        rawSseLines.push(payload);
-                        if (payload === "[DONE]")
-                            continue;
-                        try {
-                            const chunk = JSON.parse(payload);
-                            if (chunk.choices?.[0]?.delta?.content)
-                                fullText += chunk.choices[0].delta.content;
-                            if (chunk.usage) {
-                                inputTokens = chunk.usage.prompt_tokens ?? null;
-                                outputTokens = chunk.usage.completion_tokens ?? null;
-                            }
+                rawSseLines.push(...await (0, probe_wire_js_1.readProbeStream)(res, outerSignal, () => { ttftMs = Date.now() - startTime; }));
+                for (const payload of rawSseLines) {
+                    if (payload === "[DONE]")
+                        continue;
+                    try {
+                        const chunk = JSON.parse(payload);
+                        if (chunk.error)
+                            throw new Error(JSON.stringify(chunk.error));
+                        if (chunk.choices?.[0]?.delta?.content)
+                            fullText += chunk.choices[0].delta.content;
+                        if (chunk.usage) {
+                            inputTokens = chunk.usage.prompt_tokens ?? null;
+                            outputTokens = chunk.usage.completion_tokens ?? null;
                         }
-                        catch { /* ignore */ }
+                    }
+                    catch (error) {
+                        if (!(error instanceof SyntaxError))
+                            throw error;
                     }
                 }
             }
@@ -791,12 +780,12 @@ async function runProbes(options) {
             // ── token_check ──────────────────────────────────────────────────────
             if (probe.scoring === "token_check") {
                 const inflation = inputTokens !== null ? (0, token_inflation_js_1.detectTokenInflation)(inputTokens, token_inflation_js_1.TOKEN_INFLATION_THRESHOLD) : null;
-                result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+                result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: true,
                     status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
                     response: fullText.slice(0, 1000), error: null,
-                    passed: inflation ? (inflation.detected ? false : true) : "warning",
+                    passed: null,
                     passReason: inflation
-                        ? (inflation.detected ? `Token inflation detected: prompt_tokens=${inflation.actualPromptTokens} (threshold: ${token_inflation_js_1.TOKEN_INFLATION_THRESHOLD}) — probable hidden system prompt injection` : `No inflation: prompt_tokens=${inflation.actualPromptTokens}`)
+                        ? (inflation.detected ? `Additional prompt overhead observed: prompt_tokens=${inflation.actualPromptTokens} (reference: ${token_inflation_js_1.TOKEN_INFLATION_THRESHOLD}). Agent/system wrappers can legitimately add tokens; this does not establish malicious injection` : `No inflation: prompt_tokens=${inflation.actualPromptTokens}`)
                         : "Token count not available" };
                 results.push(result);
                 onProgress?.(result, idx, probes.length);
@@ -872,6 +861,11 @@ async function runProbes(options) {
         onProgress?.(result, idx, probes.length);
     }
     // ── Identity Phase ────────────────────────────────────────────────────────
+    const fullSuite = options.probeIds === undefined || original_suite_js_1.ORIGINAL_SUITE_IDS.every(id => options.probeIds.includes(id));
+    if (!replay && (0, glm_distribution_models_js_1.supportsGlmDistribution)(modelId) && (fullSuite || options.distributionSampling)) {
+        distributionEvidence = await (0, distribution_evidence_js_1.collectDistributionEvidence)({ baseUrl, apiKey, modelId, customHeaders,
+            signal: outerSignal, timeoutMs, fetchFn: rawFetch, maxCalls: 51, onProgress: options.onDistributionProgress });
+    }
     let identityAssessment;
     {
         const featureResponses = {};
@@ -896,7 +890,10 @@ async function runProbes(options) {
             }
         }
         if (Object.keys(featureResponses).length > 0) {
-            const features = (0, fingerprint_extractor_js_1.extractFingerprint)(featureResponses);
+            // Feature-extract responses include the linguistic/tokenizer/creator
+            // probes too. Without the fallback map all of those discriminating
+            // features were silently empty and generic agent style dominated.
+            const features = (0, fingerprint_extractor_js_1.extractFingerprint)(featureResponses, {}, [], featureResponses);
             // Rule-based candidates (always run)
             const ruleCandidates = (0, candidate_matcher_js_1.matchCandidates)(features);
             const ruleScores = ruleCandidates.map(c => ({ family: c.family, score: c.score }));
@@ -930,6 +927,14 @@ async function runProbes(options) {
             const adjustedConfidence = riskFlags.length > 0
                 ? Math.max(0, confidence - 0.15 * Math.min(riskFlags.length, 3))
                 : confidence;
+            let advanced;
+            try {
+                advanced = (0, advanced_identity_js_1.assessAdvancedIdentity)({ results, claimedModel: options.claimedModel, savedObservations: distributionEvidence?.observations });
+            }
+            catch {
+                // Optional diagnostics must not discard a completed run or expose response text.
+                riskFlags.push("Advanced identity diagnostics unavailable; primary family assessment retained");
+            }
             identityAssessment = {
                 status,
                 confidence: Math.round(adjustedConfidence * 100) / 100,
@@ -938,21 +943,47 @@ async function runProbes(options) {
                 predictedCandidates: candidates,
                 riskFlags,
                 evidence,
-                // Original-page verdict: claimed family present among candidates still
-                // resolves to "same family — exact model unconfirmed", not a mismatch.
+                // Preserve supported family consistency despite style overlap; this
+                // evidence cannot establish the exact model.
                 verdict: {
                     ...(0, candidate_matcher_js_1.deriveFamilyVerdict)(candidates, claimedFamily),
                     trueModel: null,
                     spoofMethod: null,
                 },
+                advanced,
+                distributionEvidence,
             };
+            // One persisted verdict drives both the saved detail and summary. Never promote
+            // the closed-set posterior into the legacy numeric assessment confidence.
+            if (advanced && (advanced.distribution.result.acceptedModel || (0, glm_distribution_models_js_1.supportsGlmDistribution)(options.claimedModel))) {
+                identityAssessment.verdict = advanced.verdict;
+                identityAssessment.predictedFamily = advanced.verdict.trueFamily ?? predictedFamily;
+                if (advanced.distribution.result.acceptedModel) {
+                    identityAssessment.predictedFamily = "zhipu";
+                    identityAssessment.status = advanced.verdict.status === "likely_match" ? "match" : "uncertain";
+                }
+                else if (advanced.verdict.status === "clean_match_family_only") {
+                    identityAssessment.status = "match";
+                }
+                else {
+                    identityAssessment.status = "uncertain";
+                }
+            }
         }
+    }
+    // Even if every text task failed, keep the paid distribution sample for replay.
+    if (!identityAssessment && distributionEvidence) {
+        identityAssessment = { status: "insufficient_data", confidence: 0, claimedModel: options.claimedModel,
+            predictedFamily: undefined, predictedCandidates: [], riskFlags: [],
+            evidence: ["No usable family text evidence; saved distribution samples cannot establish identity alone"],
+            verdict: { status: "insufficient_data", trueFamily: null, trueModel: null, spoofMethod: null,
+                confidence: "low", reasoning: ["Family corroboration unavailable"] }, distributionEvidence };
     }
     // ── Finalize ──────────────────────────────────────────────────────────────
     const completedAt = new Date().toISOString();
     const { low, high } = (0, probe_score_js_1.computeProbeScore)(results.map(r => ({ status: r.status, passed: r.passed, neutral: r.neutral })));
-    const totalIn = results.reduce((s, r) => s + (r.inputTokens ?? 0), 0);
-    const totalOut = results.reduce((s, r) => s + (r.outputTokens ?? 0), 0);
+    const totalIn = results.reduce((s, r) => s + (r.inputTokens ?? 0), 0) + (distributionEvidence?.inputTokens ?? 0);
+    const totalOut = results.reduce((s, r) => s + (r.outputTokens ?? 0), 0) + (distributionEvidence?.outputTokens ?? 0);
     return {
         baseUrl,
         modelId,

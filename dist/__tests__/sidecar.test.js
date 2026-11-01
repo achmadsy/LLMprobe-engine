@@ -150,6 +150,7 @@ const original_suite_js_1 = require("../original-suite.js");
             (0, vitest_1.expect)(json.version).toBe(sidecar_js_1.SIDECAR_VERSION);
             (0, vitest_1.expect)(json.license).toBe(sidecar_js_1.SIDECAR_LICENSE);
             (0, vitest_1.expect)(json.source).toBe(sidecar_js_1.SIDECAR_SOURCE);
+            (0, vitest_1.expect)(json.capabilities).toContain("glm-distribution-v1");
         });
         (0, vitest_1.it)("rejects GET /v1/probes with 401 when unauthenticated", async () => {
             const res = await fetch(`http://127.0.0.1:${sidecarPort}/v1/probes`);

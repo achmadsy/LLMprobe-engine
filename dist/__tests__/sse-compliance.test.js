@@ -14,6 +14,9 @@ const sse_compliance_js_1 = require("../sse-compliance.js");
         (0, vitest_1.expect)(r.issues).toHaveLength(0);
         (0, vitest_1.expect)(r.dataLines).toBe(2);
     });
+    (0, vitest_1.it)("accepts standard choices-empty usage trailers without warning", () => {
+        (0, vitest_1.expect)((0, sse_compliance_js_1.checkSSECompliance)([JSON.stringify({ choices: [], usage: { prompt_tokens: 10 } }), "[DONE]"])).toMatchObject({ passed: true, warning: false });
+    });
     (0, vitest_1.it)("counts data lines correctly", () => {
         const lines = [
             JSON.stringify({ choices: [{ delta: { content: "a" } }] }),

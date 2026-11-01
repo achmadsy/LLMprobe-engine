@@ -125,6 +125,7 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
         status: string;
         service: string;
         version: string;
+        capabilities: string[];
         license: string;
         source: string;
       };
@@ -133,6 +134,7 @@ describe("BazaarLink Probe Engine Sidecar API", () => {
       expect(json.version).toBe(SIDECAR_VERSION);
       expect(json.license).toBe(SIDECAR_LICENSE);
       expect(json.source).toBe(SIDECAR_SOURCE);
+      expect(json.capabilities).toContain("glm-distribution-v1");
     });
 
     it("rejects GET /v1/probes with 401 when unauthenticated", async () => {

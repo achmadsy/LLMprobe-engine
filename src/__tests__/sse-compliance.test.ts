@@ -14,6 +14,10 @@ describe("checkSSECompliance — valid stream", () => {
     expect(r.dataLines).toBe(2);
   });
 
+  it("accepts standard choices-empty usage trailers without warning", () => {
+    expect(checkSSECompliance([JSON.stringify({ choices: [], usage: { prompt_tokens: 10 } }), "[DONE]"])).toMatchObject({ passed: true, warning: false });
+  });
+
   it("counts data lines correctly", () => {
     const lines = [
       JSON.stringify({ choices: [{ delta: { content: "a" } }] }),

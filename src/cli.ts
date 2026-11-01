@@ -3,6 +3,7 @@
 
 import { Command } from "commander";
 import { runProbes, type ProbeResult, type BaselineMap } from "./runner.js";
+import { supportsGlmDistribution } from "./glm-distribution-models.js";
 import { runCanary } from "./canary-runner.js";
 import { PROBE_SUITE } from "./probe-suite.js";
 import { createProxyServer } from "./proxy-server.js";
@@ -132,6 +133,7 @@ program
       if (judge) console.error(`  Judge    : ${judge.modelId} @ ${judge.baseUrl} (threshold ${judge.threshold})`);
       if (!baseline && judge) console.error(`  Baseline : none — llm_judge probes will return null`);
       console.error(`  Timeout  : ${timeoutMs}ms per probe\n`);
+      if (supportsGlmDistribution(opts.model)) console.error("  GLM recheck: automatically adds up to 51 sequential target calls; produces a provisional five-reference estimate.");
     }
 
     if (!opts.quiet && opts.claimedModel) {
@@ -147,6 +149,9 @@ program
       judge,
       baseline,
       claimedModel: opts.claimedModel,
+      onDistributionProgress: ({ attempts, failures, total }) => {
+        if (!opts.quiet) console.error(`  GLM recheck: ${attempts}/${total} attempts, ${failures} failed`);
+      },
       onProgress: (result, index, total) => {
         if (!opts.quiet) {
           const ic = icon(result);

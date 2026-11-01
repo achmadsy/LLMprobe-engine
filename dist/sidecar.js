@@ -40,6 +40,8 @@ exports.createSidecarServer = createSidecarServer;
 const http = __importStar(require("http"));
 const crypto_1 = require("crypto");
 const runner_js_1 = require("./runner.js");
+const distribution_evidence_js_1 = require("./distribution-evidence.js");
+const glm_distribution_models_js_1 = require("./glm-distribution-models.js");
 const egress_guard_js_1 = require("./egress-guard.js");
 const custom_headers_js_1 = require("./custom-headers.js");
 const redaction_js_1 = require("./redaction.js");
@@ -131,7 +133,7 @@ class SidecarServer {
             status: "ok",
             service: "bazaarlink-probe-engine-sidecar",
             version: exports.SIDECAR_VERSION,
-            capabilities: ["saved-result-replay"],
+            capabilities: ["saved-result-replay", "glm-distribution-v1"],
             license: exports.SIDECAR_LICENSE,
             source: exports.SIDECAR_SOURCE,
             activeRun: this.getActiveRun(),
@@ -371,6 +373,21 @@ class SidecarServer {
             return;
         }
         const operation = body.operation;
+        try {
+            if (body.distributionSampling && (body.distributionSampling.enabled !== true || body.distributionSampling.maxCalls !== 51 ||
+                !(0, glm_distribution_models_js_1.supportsGlmDistribution)(body.modelId)))
+                throw new Error("Invalid sampling configuration");
+            if (body.savedDistributionEvidence) {
+                if (!operation)
+                    throw new Error("Saved evidence requires replay");
+                body.savedDistributionEvidence = (0, distribution_evidence_js_1.validateDistributionEvidence)(body.savedDistributionEvidence);
+            }
+        }
+        catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: { message: "Invalid distribution sampling or saved evidence", code: "bad_request" } }));
+            return;
+        }
         if (operation !== undefined) {
             const allowedIds = new Set(original_suite_js_1.ORIGINAL_SUITE_IDS);
             const rows = body.previousResults;
@@ -453,6 +470,7 @@ class SidecarServer {
                 judge: body.judge ? { ...body.judge, customHeaders: judgeCustomHeaders } : undefined,
                 signal: abortController.signal,
                 egressOptions: egressOpts,
+                onDistributionProgress: (progress) => sendSse("distribution", { runId, ...progress }),
                 onProgress: (result, index, total) => {
                     sendSse("progress", {
                         runId,

@@ -11,6 +11,26 @@ const bias_calibration_js_1 = require("../bias-calibration.js");
         (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ zh_creator_plain: responses.zh_creator_plain }, { zhipu: .99 }).hardOverride).toBe(false);
         (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)(responses, { anthropic: .99 }).hardOverride).toBe(false);
     });
+    (0, vitest_1.it)("recognizes Z.ai aliases and formatted/short answers on fixed creator prompts without granting an override alone", () => {
+        const r = (0, identity_orchestration_js_1.guardCreatorEvidence)({
+            identity_self_knowledge: "I'm **ZCode**.\n- **Underlying model**: GLM-5.3\n- **Created by**: Z.ai",
+            meta_creator: "Z.AI", zh_creator_plain: "Z.ai，GLM。",
+        }, { anthropic: .8, zhipu: .02 });
+        (0, vitest_1.expect)(r).toMatchObject({ family: "zhipu", repeatedCreatorSupport: true, hardOverride: false, contradictory: false });
+        (0, vitest_1.expect)(r.supportingProbeIds).toHaveLength(3);
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ identity_style_en: "Z.AI", identity_self_knowledge: "Z.ai" }, {}).family).toBeNull();
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ meta_creator: "Z.ai.example.com", zh_creator_plain: "Taiwan China Z.ai" }, {}).family).toBeNull();
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ meta_creator: "Z.AI" }, {}).repeatedCreatorSupport).toBe(false);
+        for (const response of ["Created by Z.ai.example.com", "Created by Z.ai-model", "Created by Z.ai2"]) {
+            (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ identity_self_knowledge: response }, {}).family).toBeNull();
+        }
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ identity_self_knowledge: "Created by Z.ai." }, {}).family).toBe("zhipu");
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ zh_creator_plain: "Z.ai，GLM and Anthropic" }, {}).family).toBeNull();
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ zh_creator_plain: "Z.ai，GLM-5.3-flash。" }, {}).family).toBe("zhipu");
+        const conflict = (0, identity_orchestration_js_1.guardCreatorEvidence)({ meta_creator: "Z.AI", zh_creator_plain: "Z.ai，GLM", identity_self_knowledge: "Created by Anthropic" }, {});
+        (0, vitest_1.expect)(conflict).toMatchObject({ contradictory: true, repeatedCreatorSupport: false });
+        (0, vitest_1.expect)((0, identity_orchestration_js_1.guardCreatorEvidence)({ zh_creator_plain: "由智谱开发，也 created by Anthropic" }, {}).contradictory).toBe(true);
+    });
     (0, vitest_1.it)("abstains on contradictory, negated, quoted, and geopolitical evidence", () => {
         const r = (0, identity_orchestration_js_1.guardCreatorEvidence)({ zh_creator_plain: "由智谱开发", identity_self_knowledge: "Developed by Anthropic" }, { zhipu: .9 });
         (0, vitest_1.expect)(r.contradictory).toBe(true);

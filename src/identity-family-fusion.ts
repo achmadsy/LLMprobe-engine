@@ -4,7 +4,7 @@
 //
 // Evidence precedence:
 //   1. Chinese affirmative self-ID (深度求索/智谱/通义) with hardOverride → wins outright.
-//      Unfakeable by a Western relay; corrects V2's English-mimicry blind spot.
+//      Self-identification can be imitated; callers must corroborate it. Never proof of maker.
 //   2. V2 behavioural family (English linguistic fingerprint) when non-"unknown".
 //   3. V3/V3E family-implied — corroboration only; can LOWER confidence, never override V2.
 // The claimed family is DIAGNOSTIC ONLY — it can never become confirmedFamily (that was the
@@ -25,7 +25,7 @@ export interface FamilyFusionInput {
   claimedFamily?: string | null;
 }
 
-export type FamilyEvidenceSource = "chinese-self-id" | "v2" | "abstain";
+export type FamilyEvidenceSource = "chinese-self-id" | "creator-distribution" | "v2" | "abstain";
 
 export interface FamilyFusionResult {
   /** The single family used for ALL downstream sub-model scoping. null = abstain. */

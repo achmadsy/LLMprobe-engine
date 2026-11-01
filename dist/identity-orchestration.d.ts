@@ -6,6 +6,7 @@ export interface CreatorGuardResult {
     evidence: string[];
     supportingProbeIds: string[];
     contradictory: boolean;
+    repeatedCreatorSupport: boolean;
 }
 export declare function guardCreatorEvidence(responses: Record<string, string>, behaviorScores: Record<string, number>): CreatorGuardResult;
 export declare function compareDistributionClusters(observations: BiasObservation[], references: BiasBaseline[]): {

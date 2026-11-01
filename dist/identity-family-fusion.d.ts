@@ -15,7 +15,7 @@ export interface FamilyFusionInput {
     /** Claimed family — DIAGNOSTIC ONLY; never becomes confirmedFamily. */
     claimedFamily?: string | null;
 }
-export type FamilyEvidenceSource = "chinese-self-id" | "v2" | "abstain";
+export type FamilyEvidenceSource = "chinese-self-id" | "creator-distribution" | "v2" | "abstain";
 export interface FamilyFusionResult {
     /** The single family used for ALL downstream sub-model scoping. null = abstain. */
     confirmedFamily: string | null;

@@ -11,6 +11,27 @@ describe("conservative identity orchestration", () => {
     expect(guardCreatorEvidence({ zh_creator_plain: responses.zh_creator_plain }, { zhipu: .99 }).hardOverride).toBe(false);
     expect(guardCreatorEvidence(responses, { anthropic: .99 }).hardOverride).toBe(false);
   });
+  it("recognizes Z.ai aliases and formatted/short answers on fixed creator prompts without granting an override alone", () => {
+    const r = guardCreatorEvidence({
+      identity_self_knowledge: "I'm **ZCode**.\n- **Underlying model**: GLM-5.3\n- **Created by**: Z.ai",
+      meta_creator: "Z.AI", zh_creator_plain: "Z.ai，GLM。",
+    }, { anthropic: .8, zhipu: .02 });
+    expect(r).toMatchObject({ family: "zhipu", repeatedCreatorSupport: true, hardOverride: false, contradictory: false });
+    expect(r.supportingProbeIds).toHaveLength(3);
+    expect(guardCreatorEvidence({ identity_style_en: "Z.AI", identity_self_knowledge: "Z.ai" }, {}).family).toBeNull();
+    expect(guardCreatorEvidence({ meta_creator: "Z.ai.example.com", zh_creator_plain: "Taiwan China Z.ai" }, {}).family).toBeNull();
+    expect(guardCreatorEvidence({ meta_creator: "Z.AI" }, {}).repeatedCreatorSupport).toBe(false);
+    for (const response of ["Created by Z.ai.example.com", "Created by Z.ai-model", "Created by Z.ai2"]) {
+      expect(guardCreatorEvidence({ identity_self_knowledge: response }, {}).family).toBeNull();
+    }
+    expect(guardCreatorEvidence({ identity_self_knowledge: "Created by Z.ai." }, {}).family).toBe("zhipu");
+    expect(guardCreatorEvidence({ zh_creator_plain: "Z.ai，GLM and Anthropic" }, {}).family).toBeNull();
+    expect(guardCreatorEvidence({ zh_creator_plain: "Z.ai，GLM-5.3-flash。" }, {}).family).toBe("zhipu");
+    const conflict = guardCreatorEvidence({ meta_creator: "Z.AI", zh_creator_plain: "Z.ai，GLM", identity_self_knowledge: "Created by Anthropic" }, {});
+    expect(conflict).toMatchObject({ contradictory: true, repeatedCreatorSupport: false });
+    expect(guardCreatorEvidence({ zh_creator_plain: "由智谱开发，也 created by Anthropic" }, {}).contradictory).toBe(true);
+  });
+
   it("abstains on contradictory, negated, quoted, and geopolitical evidence", () => {
     const r = guardCreatorEvidence({ zh_creator_plain: "由智谱开发", identity_self_knowledge: "Developed by Anthropic" }, { zhipu: .9 });
     expect(r.contradictory).toBe(true); expect(r.hardOverride).toBe(false);

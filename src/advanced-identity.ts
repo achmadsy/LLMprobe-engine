@@ -73,9 +73,28 @@ export function assessAdvancedIdentity(options: {
   const claimedFamily = options.claimedModel ? claimedModelToFamily(options.claimedModel) : undefined;
   // Conservative local corroboration guard, not a claim of reproducing SaaS rules.
   const creatorGuard = guardCreatorEvidence(responses, v2.attackFamilyScores);
-  const familyFusion = fuseFamily({ v2Family: v2.topFamily, v2Scores: v2.familyScores, claimedFamily,
+  let familyFusion = fuseFamily({ v2Family: v2.topFamily, v2Scores: v2.familyScores, claimedFamily,
     chinese: creatorGuard.family ? { family: creatorGuard.family, confidence: creatorGuard.confidence,
       hardOverride: creatorGuard.hardOverride, evidence: creatorGuard.evidence } : null });
+  const observations = validateObservations(options.savedObservations ?? []);
+  const references = [...BIAS_BASELINES, ...pack.references.map(r => r.baseline)];
+  let result = assessGlmDistribution(observations, references, { confirmedFamily: familyFusion.confirmedFamily,
+    confidence: familyFusion.confidence, contradictory: creatorGuard.contradictory });
+  const distributionCandidate = result.comparison?.decisions.sharedStrongPass.acceptedModel;
+  // Style-only V2 must not be an unconditional veto. Repeated maker answers on
+  // the fixed company prompts can corroborate a COMPLETE, gate-passing GLM
+  // distribution. The claim and incomplete cross-cluster comparison are not inputs.
+  if (!result.familySupported && creatorGuard.repeatedCreatorSupport &&
+      canonicalFamily(creatorGuard.family ?? "") === "z-ai" && distributionCandidate) {
+    // The fixed family floor is a qualitative support level, not P(authenticity).
+    familyFusion = { confirmedFamily: "zhipu", confidence: .65, source: "creator-distribution", hardOverride: false,
+      claimIgnored: !!claimedFamily && canonicalFamily(claimedFamily) !== "z-ai",
+      evidence: ["Repeated Zhipu/Z.ai creator answers plus complete gate-passing GLM distribution evidence",
+        `V2 style candidate ${v2.topFamily} retained as a diagnostic, not a veto or exact identity`,
+        "Provisional reconciliation; no independently calibrated cross-family authenticity claim"] };
+    result = assessGlmDistribution(observations, references, { confirmedFamily: familyFusion.confirmedFamily,
+      confidence: familyFusion.confidence, contradictory: creatorGuard.contradictory });
+  }
   const confirmedFamily = familyFusion.confirmedFamily ?? undefined;
   const hasV3 = ["submodel_cutoff", "submodel_capability", "submodel_refusal"].every(id => responses[id]?.trim());
   const scoped = classifySubmodelV3(responses, { predictedFamily: confirmedFamily });
@@ -96,12 +115,8 @@ export function assessAdvancedIdentity(options: {
     v3: v4.subModelMatch, v3f: v3f?.top, subModelSeparable: false,
     coverage: { errors: options.results.filter(r => r.status !== "done" || r.responseTruncated).length, total: options.results.length },
   });
-  const observations = validateObservations(options.savedObservations ?? []);
-  const references = [...BIAS_BASELINES, ...pack.references.map(r => r.baseline)];
   const clusterComparison = compareDistributionClusters(observations, references);
   const claimReferenceCovered = !!options.claimedModel && references.some(b => modelIdsMatch(b.modelId, options.claimedModel!));
-  const result = assessGlmDistribution(observations, references, { confirmedFamily: confirmedFamily ?? null,
-    confidence: familyFusion.confidence, contradictory: creatorGuard.contradictory });
   // The claim never selects the winning candidate or family. It is compared only afterward.
   if (result.acceptedModel) {
     const covered = supportsGlmDistribution(options.claimedModel);
@@ -128,8 +143,8 @@ export function assessAdvancedIdentity(options: {
     version: "advanced-offline-v1", familyFusion, creatorGuard, clusterComparison,
     decisionPath: [
       { stage: "coverage", outcome: options.results.every(r => r.status === "done") ? "answered" : "partial", reason: "Derived from stored task statuses" },
-      { stage: "family", outcome: confirmedFamily ?? "abstain", reason: creatorGuard.hardOverride ? "Corroborated creator assertions plus behavioral support" : "Behavioral evidence; unsupported or conflicting creator claims do not override" },
-      { stage: "submodel", outcome: v4.subModelMatch?.modelId ?? "abstain", reason: `Public-engine arbitration: ${v4.fuseSource}` },
+      { stage: "family", outcome: confirmedFamily ?? "abstain", reason: familyFusion.source === "creator-distribution" ? "Repeated creator answers corroborated by all 51 distribution answers passing fixed gates; V2 style conflict retained" : creatorGuard.hardOverride ? "Corroborated creator assertions plus behavioral support" : "Behavioral evidence; unsupported or conflicting creator claims do not override" },
+      { stage: "submodel", outcome: v4.subModelMatch?.modelId ?? "abstain", reason: `Legacy public-engine diagnostic: ${v4.fuseSource}; the qualified distribution stage below governs any accepted GLM estimate` },
       { stage: "twin-recheck", outcome: result.state, reason: result.acceptedModel ?? "Complete sampling, corroborated family and acceptance gates required" },
       { stage: "claim-comparison", outcome: verdict.status, reason: verdict.reasoning[0] ?? "Evidence insufficient" },
     ], v2, v3: { ...scoped, global }, v3e, v3f, v4, verdict,

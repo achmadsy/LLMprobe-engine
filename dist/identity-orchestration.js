@@ -6,15 +6,20 @@ exports.compareDistributionClusters = compareDistributionClusters;
 const model_id_normalize_js_1 = require("./model-id-normalize.js");
 const sub_model_v3g_bias_fingerprint_js_1 = require("./sub-model-v3g-bias-fingerprint.js");
 const CREATOR_PROBES = ["zh_creator_plain", "zh_who_built_pressure", "meta_creator", "identity_self_knowledge"];
-// Only explicit maker assertions, not a bare vendor name, geopolitical answer, or route label.
+// Short company answers are assertions ONLY on the two prompts explicitly asking
+// for company/model names. In arbitrary prose a bare vendor name proves nothing.
 const MAKERS = [
-    ["zhipu", /(?:由\s*(?:智谱|智譜|zhipu)|(?:开发者|開發者|开发公司|開發公司|creator|developer)\s*(?:是|为|為|:|is)?\s*(?:智谱|智譜|zhipu)|(?:developed|created|built)\s+by\s+zhipu)/i],
-    ["deepseek", /(?:由\s*(?:深度求索|deepseek)|(?:developed|created|built)\s+by\s+deepseek)/i],
-    ["qwen", /(?:由\s*(?:阿里巴巴|阿里云|阿里雲|alibaba)|(?:developed|created|built)\s+by\s+alibaba)/i],
-    ["anthropic", /(?:由\s*anthropic|(?:developed|created|built)\s+by\s+anthropic)/i],
-    ["openai", /(?:由\s*openai|(?:developed|created|built)\s+by\s+openai)/i],
-    ["google", /(?:由\s*google|(?:developed|created|built)\s+by\s+google)/i],
-];
+    { family: "zhipu", company: "(?:智谱(?:AI)?|智譜(?:AI)?|zhipu(?:\\s*ai)?|z\\.ai)", model: "glm" },
+    { family: "deepseek", company: "(?:深度求索|deepseek)", model: "deepseek" },
+    { family: "qwen", company: "(?:阿里巴巴|阿里云|阿里雲|alibaba)", model: "(?:qwen|通义|通義)" },
+    { family: "anthropic", company: "anthropic", model: "claude" },
+    { family: "openai", company: "openai", model: "(?:gpt|chatgpt)" },
+    { family: "google", company: "google", model: "gemini" },
+].map(m => ({ ...m,
+    assertion: new RegExp(`(?:由\\s*${m.company}|(?:开发者|開發者|开发公司|開發公司|creator|developer)\\s*(?:是|为|為|:|：|is)?\\s*${m.company}|(?:developed|created|built|trained)\\s+by\\s*[:：]?\\s*${m.company})(?![a-z0-9_/-]|\\.[a-z0-9])`, "i"),
+    companyAnswer: new RegExp(`^${m.company}[.。!！\\s]*$`, "i"),
+    companyModelAnswer: new RegExp(`^${m.company}\\s*[,，、:：/—-]\\s*${m.model}(?:[- ]?\\d+(?:\\.\\d+)*(?:-flash)?)?[.。!！\\s]*$`, "i"),
+}));
 function guardCreatorEvidence(responses, behaviorScores) {
     const votes = new Map();
     for (const id of CREATOR_PROBES) {
@@ -22,27 +27,39 @@ function guardCreatorEvidence(responses, behaviorScores) {
         if (!text?.trim())
             continue;
         // Negated, hypothetical, or quoted assertions are not reliable affirmative self-identification.
-        if (/(?:not|never|isn't|wasn't|不是|并非|並非|并不|並不|假设|假設|如果|\bif\b|["“”「」])/i.test(text))
+        if (/(?:\b(?:not|never|isn['’]t|wasn['’]t|if)\b|不是|并非|並非|并不|並不|假设|假設|如果|["“”「」])/i.test(text))
             continue;
-        const matches = MAKERS.filter(([, pattern]) => pattern.test(text));
+        const plain = text.replace(/[*_`]/g, "").trim();
+        const shortAnswer = id === "meta_creator" || id === "zh_creator_plain";
+        const matches = MAKERS.filter(m => m.assertion.test(plain) || (shortAnswer &&
+            (m.companyAnswer.test(plain) || (id === "zh_creator_plain" && m.companyModelAnswer.test(plain)))));
+        // Competing explicit makers in one answer are a conflict, not a silently ignored vote.
+        if (matches.length > 1) {
+            for (const m of matches)
+                votes.set(m.family, [...(votes.get(m.family) ?? []), id]);
+            continue;
+        }
         if (matches.length !== 1)
             continue;
-        const family = matches[0][0];
+        const family = matches[0].family;
         votes.set(family, [...(votes.get(family) ?? []), id]);
     }
     const ranked = [...votes.entries()].sort((a, b) => b[1].length - a[1].length);
     const winner = ranked[0];
     if (!winner)
-        return { family: null, confidence: 0, hardOverride: false, supportingProbeIds: [], contradictory: false, evidence: ["No unambiguous affirmative creator evidence"] };
+        return { family: null, confidence: 0, hardOverride: false, supportingProbeIds: [], contradictory: false, repeatedCreatorSupport: false, evidence: ["No unambiguous affirmative creator evidence"] };
     const [family, supportingProbeIds] = winner;
     const contradictory = ranked.length > 1;
     const chinese = supportingProbeIds.some(id => id.startsWith("zh_"));
-    const corroborated = !contradictory && chinese && supportingProbeIds.length >= 2 && (behaviorScores[family] ?? 0) >= 0.4;
-    return { family, supportingProbeIds, contradictory, hardOverride: corroborated,
+    const repeatedCreatorSupport = !contradictory && chinese && supportingProbeIds.length >= 2;
+    const corroborated = repeatedCreatorSupport && (behaviorScores[family] ?? 0) >= 0.4;
+    return { family, supportingProbeIds, contradictory, repeatedCreatorSupport, hardOverride: corroborated,
         // A local rule confidence, not the probability that the endpoint is authentic.
         confidence: corroborated ? 0.95 : 0,
         evidence: [corroborated ? `Creator assertions for ${family} corroborated across prompts and behavioral evidence` :
-                contradictory ? "Creator assertions contradict one another; no self-ID override applied" : "Creator assertion lacks cross-prompt/behavioral corroboration; no override applied",
+                contradictory ? "Creator assertions contradict one another; no self-ID override applied" :
+                    repeatedCreatorSupport ? `Repeated creator answers support ${family}, but lack style-based corroboration; no creator-only override applied` :
+                        "Creator assertion lacks cross-prompt/behavioral corroboration; no override applied",
             "Self-identification can be imitated; this guard is not proof of maker or exact model"],
     };
 }

@@ -9,7 +9,7 @@
     "bazaarlink-probe": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc && node -e \"require('node:fs').copyFileSync('src/glm53-bias-reference-pack.json', 'dist/glm53-bias-reference-pack.json')\"",
+    "build": "tsc && node -e \"const fs = require('node:fs'); for (const name of ['baselines-v3e-snapshot.json', 'glm53-bias-reference-pack.json']) fs.copyFileSync('src/' + name, 'dist/' + name)\"",
     "dev": "ts-node src/cli.ts",
     "sidecar": "ts-node src/sidecar-cli.ts",
     "start:sidecar": "node dist/sidecar-cli.js",

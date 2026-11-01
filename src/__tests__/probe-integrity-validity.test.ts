@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { runProbes } from "../runner.js";
-import { expectedEcho, readProbeStream } from "../probe-wire.js";
+import { expectedEcho, readProbeStream, reportsMissingPdfAttachment } from "../probe-wire.js";
 import { extractFingerprint } from "../fingerprint-extractor.js";
 import { matchCandidates } from "../candidate-matcher.js";
 import { PROBE_PDF_B64 } from "../multimodal-fixtures.js";
@@ -69,6 +69,26 @@ describe("integrity probe validity", () => {
       return body.max_tokens === 1 ? Response.json({}) : new Response("PDF input is not supported", { status: 400 });
     }) });
     expect(report.results[0]).toMatchObject({ status: "skipped", neutral: true, passed: null });
+  });
+
+  it("classifies the reported missing PDF as unconfirmed delivery and fixes it during offline rejudge", async () => {
+    const text = "I don't have access to the PDF you're referring to — the file wasn't included with your message, so I can't read its contents. Let me check whether it exists in the working directory.";
+    const report = await runProbes({ ...options, probeIds: ["multimodal_pdf"], fetchFn: vi.fn(async (_url, init) => {
+      const body = JSON.parse(String(init?.body)); return body.stream ? sse(text) : Response.json({});
+    }) });
+    const result = report.results[0];
+    expect(result).toMatchObject({ status: "done", neutral: true, passed: null, response: text });
+    expect(result.passReason).toContain("delivery is unconfirmed");
+    const fetchFn = vi.fn(async () => { throw new Error("No target requests"); });
+    const rejudged = await runProbes({ ...options, operation: "rejudge", probeIds: ["multimodal_pdf"],
+      previousResults: [{ ...result, passed: false, neutral: false }], fetchFn });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(rejudged.results[0]).toMatchObject({ response: text, passed: null, neutral: true });
+  });
+
+  it("does not turn an incorrect PDF answer or ordinary reading failure into missing delivery", () => {
+    for (const text of ["The word is MARKET", "I read the PDF but cannot identify the word", "The file is blurry", "BAZAAR"])
+      expect(reportsMissingPdfAttachment(text)).toBe(false);
   });
 
   it("treats ordinary content blocks as text, not evidence of thinking", async () => {

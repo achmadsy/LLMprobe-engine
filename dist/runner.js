@@ -278,6 +278,11 @@ async function runProbes(options) {
                     result.passed = scored.passed;
                     result.passReason = scored.reason;
                 }
+                if (probe.id === "multimodal_pdf" && scored?.passed !== true && (0, probe_wire_js_1.reportsMissingPdfAttachment)(previous.response)) {
+                    result.passed = null;
+                    result.neutral = true;
+                    result.passReason = "PDF attachment delivery is unconfirmed: the saved response reports a missing file. PDF reading was not assessed; rejudge cannot establish delivery from text alone";
+                }
             }
             results.push(result);
             onProgress?.(result, idx, probes.length);
@@ -837,6 +842,11 @@ async function runProbes(options) {
                     passReason = "llm_judge: no judge endpoint configured — pass --judge-base-url to enable auto-scoring";
                 }
             }
+            const pdfDeliveryUnconfirmed = probe.id === "multimodal_pdf" && passed !== true && (0, probe_wire_js_1.reportsMissingPdfAttachment)(fullText);
+            if (pdfDeliveryUnconfirmed) {
+                passed = null;
+                passReason = "PDF attachment delivery is unconfirmed: the response reports a missing file. PDF reading was not assessed; this does not establish a model integrity failure";
+            }
             const transportRetries = (0, retry_fetch_js_1.retryCountOf)(res);
             if (transportRetries > 0 && passReason) {
                 passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
@@ -845,7 +855,7 @@ async function runProbes(options) {
             // can show expected-vs-actual without reverse-engineering passReason.
             const expected = probe.expectedExact ?? probe.expectedContains
                 ?? (probe.passIfContains?.length ? probe.passIfContains.join(" | ") : null);
-            result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+            result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: pdfDeliveryUnconfirmed || (probe.neutral ?? false),
                 status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
                 response: fullText.slice(0, 4000), responseTruncated: fullText.length > 4000, passed, passReason, error: null,
                 scoring: probe.scoring, expected,
@@ -955,19 +965,10 @@ async function runProbes(options) {
             };
             // One persisted verdict drives both the saved detail and summary. Never promote
             // the closed-set posterior into the legacy numeric assessment confidence.
-            if (advanced && (advanced.distribution.result.acceptedModel || (0, glm_distribution_models_js_1.supportsGlmDistribution)(options.claimedModel))) {
+            if (advanced?.distribution.result.acceptedModel) {
                 identityAssessment.verdict = advanced.verdict;
-                identityAssessment.predictedFamily = advanced.verdict.trueFamily ?? predictedFamily;
-                if (advanced.distribution.result.acceptedModel) {
-                    identityAssessment.predictedFamily = "zhipu";
-                    identityAssessment.status = advanced.verdict.status === "likely_match" ? "match" : "uncertain";
-                }
-                else if (advanced.verdict.status === "clean_match_family_only") {
-                    identityAssessment.status = "match";
-                }
-                else {
-                    identityAssessment.status = "uncertain";
-                }
+                identityAssessment.predictedFamily = "zhipu";
+                identityAssessment.status = advanced.verdict.status === "likely_match" ? "match" : "uncertain";
             }
         }
     }

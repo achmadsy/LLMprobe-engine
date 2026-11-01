@@ -41,6 +41,7 @@ describe("offline advanced identity stages", () => {
       probeIds: rows.map(r => r.probeId), fetchFn });
     expect(fetchFn).not.toHaveBeenCalled();
     expect(report.identityAssessment?.advanced?.distribution.state).toBe("not-sampled");
+    expect(report.identityAssessment?.verdict).toMatchObject({ status: "clean_match_family_only", trueFamily: "zhipu", trueModel: null });
     expect(report.results.map(r => r.response)).toEqual(rows.map(r => r.response));
   });
 });

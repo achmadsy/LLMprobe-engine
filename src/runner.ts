@@ -6,7 +6,7 @@ import { computeProbeScore } from "./probe-score.js";
 import { classifyPreflightResult } from "./probe-preflight.js";
 import { detectTokenInflation, TOKEN_INFLATION_THRESHOLD } from "./token-inflation.js";
 import { checkSSECompliance } from "./sse-compliance.js";
-import { readProbeStream, expectedEcho } from "./probe-wire.js";
+import { readProbeStream, expectedEcho, reportsMissingPdfAttachment } from "./probe-wire.js";
 import { runContextCheck } from "./context-check.js";
 import { extractFingerprint } from "./fingerprint-extractor.js";
 import { matchCandidates, deriveVerdictFromClaimedModel, deriveFamilyVerdict } from "./candidate-matcher.js";
@@ -436,6 +436,11 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
           && ["keyword_match", "exact_match"].includes(probe.scoring)) {
         const scored = autoScore(probe, previous.response, {}, "en");
         if (scored) { result.passed = scored.passed; result.passReason = scored.reason; }
+        if (probe.id === "multimodal_pdf" && scored?.passed !== true && reportsMissingPdfAttachment(previous.response)) {
+          result.passed = null;
+          result.neutral = true;
+          result.passReason = "PDF attachment delivery is unconfirmed: the saved response reports a missing file. PDF reading was not assessed; rejudge cannot establish delivery from text alone";
+        }
       }
       results.push(result);
       onProgress?.(result, idx, probes.length);
@@ -982,6 +987,12 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
         }
       }
 
+      const pdfDeliveryUnconfirmed = probe.id === "multimodal_pdf" && passed !== true && reportsMissingPdfAttachment(fullText);
+      if (pdfDeliveryUnconfirmed) {
+        passed = null;
+        passReason = "PDF attachment delivery is unconfirmed: the response reports a missing file. PDF reading was not assessed; this does not establish a model integrity failure";
+      }
+
       const transportRetries = retryCountOf(res);
       if (transportRetries > 0 && passReason) {
         passReason += ` (after ${transportRetries} transport ${transportRetries === 1 ? "retry" : "retries"})`;
@@ -992,7 +1003,7 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       const expected = probe.expectedExact ?? probe.expectedContains
         ?? (probe.passIfContains?.length ? probe.passIfContains.join(" | ") : null);
 
-      result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: probe.neutral ?? false,
+      result = { probeId: probe.id, label: probe.label, group: probe.group, neutral: pdfDeliveryUnconfirmed || (probe.neutral ?? false),
         status: "done", ttftMs: ttftMs ?? durationMs, durationMs, inputTokens, outputTokens, tps,
         response: fullText.slice(0, 4000), responseTruncated: fullText.length > 4000, passed, passReason, error: null,
         scoring: probe.scoring, expected,
@@ -1124,17 +1135,10 @@ export async function runProbes(options: RunOptions): Promise<RunReport> {
       };
       // One persisted verdict drives both the saved detail and summary. Never promote
       // the closed-set posterior into the legacy numeric assessment confidence.
-      if (advanced && (advanced.distribution.result.acceptedModel || supportsGlmDistribution(options.claimedModel))) {
+      if (advanced?.distribution.result.acceptedModel) {
         identityAssessment.verdict = advanced.verdict;
-        identityAssessment.predictedFamily = advanced.verdict.trueFamily ?? predictedFamily;
-        if (advanced.distribution.result.acceptedModel) {
-          identityAssessment.predictedFamily = "zhipu";
-          identityAssessment.status = advanced.verdict.status === "likely_match" ? "match" : "uncertain";
-        } else if (advanced.verdict.status === "clean_match_family_only") {
-          identityAssessment.status = "match";
-        } else {
-          identityAssessment.status = "uncertain";
-        }
+        identityAssessment.predictedFamily = "zhipu";
+        identityAssessment.status = advanced.verdict.status === "likely_match" ? "match" : "uncertain";
       }
     }
   }

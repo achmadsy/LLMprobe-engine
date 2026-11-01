@@ -68,6 +68,25 @@ const options = { baseUrl: "https://target.example/v1", apiKey: "secret-test-key
             }) });
         (0, vitest_1.expect)(report.results[0]).toMatchObject({ status: "skipped", neutral: true, passed: null });
     });
+    (0, vitest_1.it)("classifies the reported missing PDF as unconfirmed delivery and fixes it during offline rejudge", async () => {
+        const text = "I don't have access to the PDF you're referring to — the file wasn't included with your message, so I can't read its contents. Let me check whether it exists in the working directory.";
+        const report = await (0, runner_js_1.runProbes)({ ...options, probeIds: ["multimodal_pdf"], fetchFn: vitest_1.vi.fn(async (_url, init) => {
+                const body = JSON.parse(String(init?.body));
+                return body.stream ? sse(text) : Response.json({});
+            }) });
+        const result = report.results[0];
+        (0, vitest_1.expect)(result).toMatchObject({ status: "done", neutral: true, passed: null, response: text });
+        (0, vitest_1.expect)(result.passReason).toContain("delivery is unconfirmed");
+        const fetchFn = vitest_1.vi.fn(async () => { throw new Error("No target requests"); });
+        const rejudged = await (0, runner_js_1.runProbes)({ ...options, operation: "rejudge", probeIds: ["multimodal_pdf"],
+            previousResults: [{ ...result, passed: false, neutral: false }], fetchFn });
+        (0, vitest_1.expect)(fetchFn).not.toHaveBeenCalled();
+        (0, vitest_1.expect)(rejudged.results[0]).toMatchObject({ response: text, passed: null, neutral: true });
+    });
+    (0, vitest_1.it)("does not turn an incorrect PDF answer or ordinary reading failure into missing delivery", () => {
+        for (const text of ["The word is MARKET", "I read the PDF but cannot identify the word", "The file is blurry", "BAZAAR"])
+            (0, vitest_1.expect)((0, probe_wire_js_1.reportsMissingPdfAttachment)(text)).toBe(false);
+    });
     (0, vitest_1.it)("treats ordinary content blocks as text, not evidence of thinking", async () => {
         const report = await (0, runner_js_1.runProbes)({ ...options, probeIds: ["thinking_block"], fetchFn: vitest_1.vi.fn(async (_url, init) => {
                 const body = JSON.parse(String(init?.body));

@@ -30,6 +30,16 @@ export async function readProbeStream(response: Response, signal?: AbortSignal, 
   return payloads;
 }
 
+// A text-only missing-attachment answer does not test PDF reading. This is
+// unconfirmed delivery, NOT proof that the model lacks document capability.
+export function reportsMissingPdfAttachment(text: string): boolean {
+  return /\b(?:pdf|file|document|attachment)\b/i.test(text) && (
+    /\b(?:no|without)\s+(?:pdf|file|document|attachment)\b/i.test(text) ||
+    /\b(?:pdf|file|document|attachment)\b[^.!?\n]{0,100}\b(?:was(?:n['’]t| not)|is(?:n['’]t| not)|not)\s+(?:included|attached|provided|uploaded|available)\b/i.test(text) ||
+    /\b(?:did(?:n['’]t| not)|have(?:n['’]t| not))\s+(?:receive|received)\b[^.!?\n]{0,80}\b(?:pdf|file|document|attachment)\b/i.test(text)
+  );
+}
+
 export function expectedEcho(prompt: string): string {
   return prompt.split("---BEGIN---\n")[1]?.split("\n---END---")[0] ?? "";
 }

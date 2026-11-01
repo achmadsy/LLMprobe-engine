@@ -38,6 +38,7 @@ const rows = [row("identity_self_knowledge", "I am GLM, developed by Zhipu AI"),
             probeIds: rows.map(r => r.probeId), fetchFn });
         (0, vitest_1.expect)(fetchFn).not.toHaveBeenCalled();
         (0, vitest_1.expect)(report.identityAssessment?.advanced?.distribution.state).toBe("not-sampled");
+        (0, vitest_1.expect)(report.identityAssessment?.verdict).toMatchObject({ status: "clean_match_family_only", trueFamily: "zhipu", trueModel: null });
         (0, vitest_1.expect)(report.results.map(r => r.response)).toEqual(rows.map(r => r.response));
     });
 });
